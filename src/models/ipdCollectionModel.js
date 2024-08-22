@@ -48,9 +48,6 @@ const getIPDCollection = async (req) => {
 };
 
 const getTotalIPDCollection = async (req) => {
-  console.log(req.params.location);
-  console.log(req.params.from);
-  console.log(req.params.to);
   const { connection, location } = getConnectionByLocation(req.query.location); // Ensure `req.params.location` is correct
 
   if (!connection) {
@@ -72,7 +69,6 @@ const getTotalIPDCollection = async (req) => {
             ip.receipt_date,
             SUM(ip.cashamt) AS total_cashamt,
             SUM(ip.cardamt) AS total_cardamt,
-            SUM(ip.chequeamt) AS total_chequeamt,
             SUM(ip.onlineamt) AS total_onlineamt,
             SUM(ip.discountamt) AS total_discountamt
           FROM ipd_payment ip

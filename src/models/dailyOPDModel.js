@@ -311,19 +311,16 @@ async function getDailyOPDCollection(req) {
           AND is_deleted != 1
       `;
 
-      const [cashTotal, cardTotal, onlineTotal, chequeTotal] =
-        await Promise.all([
-          executeQuery(cashTotalQuery, [currentDate]),
-          executeQuery(cardTotalQuery, [currentDate]),
-          executeQuery(onlineTotalQuery, [currentDate]),
-          executeQuery(chequeTotalQuery, [currentDate]),
-        ]);
+      const [cashTotal, cardTotal, onlineTotal] = await Promise.all([
+        executeQuery(cashTotalQuery, [currentDate]),
+        executeQuery(cardTotalQuery, [currentDate]),
+        executeQuery(onlineTotalQuery, [currentDate]),
+      ]);
 
       const cashtablesum =
         (cashTotal[0].Total || 0) +
         (cardTotal[0].Total || 0) +
-        (onlineTotal[0].Total || 0) +
-        (chequeTotal[0].Total || 0);
+        (onlineTotal[0].Total || 0);
 
       const queries = [
         "SELECT SUM(total) AS MCDPA FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'MCDPA'",
@@ -466,7 +463,6 @@ async function getDailyOPDCollection(req) {
           ["Cash", cashTotal[0].Total || 0],
           ["Card", cardTotal[0].Total || 0],
           ["Online", onlineTotal[0].Total || 0],
-          ["Cheque", chequeTotal[0].Total || 0],
           ["Total", cashtablesum],
         ],
       };
