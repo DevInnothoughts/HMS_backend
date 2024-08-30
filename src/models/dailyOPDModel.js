@@ -364,7 +364,6 @@ async function getDailyOPDCollection(req) {
       });
       return {
         dailyOPDReport: [
-          ["New", "Follow UP", "PO", "PROCTOSCOPY", "TOTAL"],
           [
             newPatientCount[0].newpatient,
             followPatientCount[0].followpatient,
@@ -375,35 +374,30 @@ async function getDailyOPDCollection(req) {
         ],
         detailedData: [
           [
-            "DNC",
             newDNCount[0].newDNCount,
             followDNCount[0].FollowDNCount,
             poDNCCount[0].PODNCCount,
             sumofDNC,
           ],
           [
-            "DNP",
             newDNPCount[0].newDNPCount,
             followDNPCount[0].FollowDNPCount,
             poDNPCount[0].PODNPCount,
             sumofDNP,
           ],
           [
-            "DNW",
             newDNWCount[0].newDNWCount,
             followDNWCount[0].FollowDNWCount,
             poDNWCount[0].PODNWCount,
             sumofDNW,
           ],
           [
-            "DNT",
             cancelNewPatientCount[0].is_deleted,
             cancelFollowPatientCount[0].is_deleted,
             cancelPOPatientCount[0].is_deleted,
             sumofDNT,
           ],
           [
-            "WALK-IN",
             walkINNewPatientCount[0].FDEName,
             walkINFollowPatientCount[0].FDEName,
             walkINPOPatientCount[0].FDEName,
