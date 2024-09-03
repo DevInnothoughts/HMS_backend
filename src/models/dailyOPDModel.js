@@ -4,8 +4,8 @@ async function getDailyOPDCollection(req) {
   const { connection, location } = getConnectionByLocation(req.query.location);
 
   // Get the current date in YYYY-MM-DD format
-  const currentDate = new Date().toISOString().split("T")[0];
-
+  const currentDate = new Date(req.query.date).toISOString().split("T")[0];
+  console.log("Current date:", currentDate);
   if (!connection) {
     const err = new Error("Invalid location");
     err.status = 404;
