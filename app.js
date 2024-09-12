@@ -9,6 +9,8 @@ const dailyOPDController = require("./src/controllers/DailyOPDController");
 const commonController = require("./src/controllers/commonController");
 const dashboardController = require("./src/controllers/dashboardController");
 const depositController = require("./src/controllers/depositController");
+const IVRController = require("./src/controllers/ivrCallController");
+
 app.use(express.json());
 app.use(cors());
 
@@ -21,6 +23,7 @@ app.use("/hms/DailyOPD", dailyOPDController);
 app.use("/hms/Common", commonController);
 app.use("/hms/Dashboard", dashboardController);
 app.use("/hms/Deposit", depositController);
+app.use("/hms/IVRCall", IVRController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

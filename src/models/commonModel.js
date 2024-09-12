@@ -8,7 +8,10 @@ const userLogin = async (req, res) => {
 
     if (!doc.exists) {
       console.log("No such document!");
-      return res.status(404).json({ message: "No such document!" });
+      return res.status(404).json({
+        message:
+          "This number not registered with us! Please contact administrator.",
+      });
     }
 
     const doc_data = doc.data();
