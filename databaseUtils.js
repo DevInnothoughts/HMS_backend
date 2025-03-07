@@ -5,7 +5,7 @@ const conDP = createPool("hmsDPDB");
 const conAndheri = createPool("hmsAndheriDB");
 const conBaner = createPool("hmsBanerDB");
 const conBangalore = createPool("hmsBangaloreDB");
-const conBelgavi = createPool("hmsBelgaviDB");
+const conBelgavi = createPool("hmsBelagaviDB");
 const conChakan = createPool("hmsChakanDB");
 const conDighi = createPool("hmsDighiDB");
 const conGurgaon14 = createPool("hmsGurgaon14DB");
@@ -16,7 +16,7 @@ const conIndiranagar = createPool("hmsIndiranagarDB");
 const conIndore = createPool("hmsIndoreDB");
 const conkc = createPool("hmskcDB");
 const conKolhapur = createPool("hmsKolhapurDB");
-const conLatur = createPool("hmslaturDB");
+const conLatur = createPool("hmsLaturDB");
 const conLudhiana = createPool("hmsLudhianaDB");
 const conMysore = createPool("hmsMysoreDB");
 const conNashik = createPool("hmsNashikDB");
@@ -30,6 +30,11 @@ const conThane = createPool("hmsThaneDB");
 const conTilakroad = createPool("hmsTilakroadDB");
 const conUndri = createPool("hmsUndriDB");
 const conVashi = createPool("hmsVashiDB");
+const conHinjewadi = createPool("hmsHinjewadiDB");
+const conLucknow = createPool("hmsLucknowDB");
+const conKalaburagi = createPool("hmsKalaburagiDB");
+const conRajajiNagar = createPool("hmsRajajinagarDB");
+const conSarjapura = createPool("hmsSarjapuraDB");
 
 const getConnectionByLocation = (loc) => {
   let connection;
@@ -215,6 +220,34 @@ const getConnectionByLocation = (loc) => {
     case "Vashi":
       connection = conVashi;
       location = "Vashi";
+      break;
+
+    case "Hinjewadi":
+      connection = conHinjewadi;
+      location = "Hinjewadi";
+      break;
+
+    case "Lucknow":
+      connection = conLucknow;
+      location = "Lucknow";
+      break;
+
+    case "Gulbarga":
+    case "Kalaburagi":
+    case "Kalburgi":
+      connection = conKalaburagi;
+      location = "Kalaburagi";
+      break;
+
+    case "Rajaji Nagar":
+      connection = conRajajiNagar;
+      location = "Rajaji Nagar";
+      break;
+
+    case "Sarjapura":
+      connection = conSarjapura;
+      location = "Sarjapura";
+      break;
 
     default:
       connection = null;

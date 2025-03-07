@@ -112,4 +112,90 @@ const getDiagnosis = async (req) => {
   }
 };
 
-module.exports = { getPatient, getDiagnosis };
+async function getReference(req) {
+  const { connection, location } = getConnectionByLocation(req.query.location);
+  console.log(
+    new Date(req.query.from).getTime(),
+    new Date(req.query.to).getTime()
+  );
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  // Function to execute a query
+  const executeQuery = (query, values = []) => {
+    return new Promise((resolve, reject) => {
+      connection.query(query, values, (error, results) => {
+        if (error) {
+          return reject(error);
+        }
+        resolve(results);
+      });
+    });
+  };
+
+  const getCounts = async () => {
+    try {
+      const referenceTypeCountQuery = `
+      SELECT reference_type, COUNT(*) AS count
+      FROM patient
+      WHERE date >= ?  
+      AND date <= ?
+      AND ConfirmPatient = 1
+      AND is_deleted = 0
+      GROUP BY reference_type;
+    `;
+
+      const referenceTypeCount = await executeQuery(referenceTypeCountQuery, [
+        req.query.from,
+        req.query.to,
+      ]);
+
+      // Mapping of reference types to readable names
+      const referenceTypeMap = {
+        dr_ref: "Referred By Doctor",
+        family_friends: "Family Friends",
+        hhc_board: "HHC Board",
+        HHF: "HHF",
+        internet: "Internet",
+        MediaRef: "Media Referral",
+        newspaper: "Newspaper",
+        old_ref: "Old Patient Referral",
+        other: "Other",
+        WOM: "Word of Mouth",
+        null: "Unknown",
+      };
+
+      // Calculate total count
+      let totalCount = referenceTypeCount.reduce(
+        (sum, item) => sum + item.count,
+        0
+      );
+
+      // Transform data with readable names and percentage calculation
+      const transformedData = referenceTypeCount.map((item) => {
+        const percentage = Math.round((item.count / totalCount) * 100); // Round to nearest whole number
+        return {
+          reference_type:
+            referenceTypeMap[item.reference_type] || item.reference_type,
+          count: item.count,
+          percentage: percentage,
+        };
+      });
+
+      console.log(transformedData);
+
+      return { referenceTypeCount: transformedData, totalCount };
+    } catch (error) {
+      console.error("Error executing queries:", error);
+      throw error;
+    }
+  };
+
+  return getCounts();
+}
+
+module.exports = { getPatient, getDiagnosis, getReference };

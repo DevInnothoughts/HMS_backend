@@ -176,7 +176,7 @@ async function getAppointment(req) {
             d.name AS doctor_name
           FROM appointment ap
           JOIN patient p ON ap.patient_id = p.patient_id
-          JOIN doctor d ON ap.doctor_id = d.doctor_id
+          LEFT JOIN doctor d ON ap.doctor_id = d.doctor_id
           WHERE ap.appointment_timestamp >= ?  
           AND ap.appointment_timestamp <= ?
           AND ap.is_deleted != 1
@@ -196,4 +196,94 @@ async function getAppointment(req) {
   });
 }
 
-module.exports = { addAppointment, getAppointment };
+async function getDoctorsAppointments(req) {
+  const { connection, location } = getConnectionByLocation(req.query.location);
+  if (!connection) {
+    throw new Error("Invalid location");
+  }
+
+  // Function to execute a query
+  const executeQuery = (tempCon, query, values = []) => {
+    return new Promise((resolve, reject) => {
+      tempCon.query(query, values, (error, results) => {
+        if (error) {
+          return reject(error);
+        }
+        resolve(results);
+      });
+    });
+  };
+
+  return new Promise((resolve, reject) => {
+    connection.getConnection(async (err, tempCon) => {
+      if (err) {
+        return reject(err);
+      }
+
+      try {
+        // Get Doctor ID
+        const doctorIdQuery = `
+          SELECT doctor_id 
+          FROM doctor 
+          WHERE phone = ? 
+          AND is_deleted != 1
+        `;
+
+        const doctorRows = await executeQuery(tempCon, doctorIdQuery, [
+          req.query.mobile,
+        ]);
+
+        if (doctorRows.length === 0) {
+          tempCon.release();
+          return resolve({ doctorId: null, appointments: [] });
+        }
+
+        const doctorId = doctorRows[0].doctor_id;
+
+        // Get Appointments for the Doctor
+        const appointmentQuery = `
+          SELECT 
+            ap.patient_phone,
+            ap.patient_type,
+            ap.appointment_timestamp,
+            ap.appointment_time,
+            ap.confirm_time,
+            ap.FDE_Name,
+            p.name AS patient_name,
+            d.name AS doctor_name
+          FROM appointment ap
+          JOIN patient p ON ap.patient_id = p.patient_id
+          LEFT JOIN doctor d ON ap.doctor_id = d.doctor_id
+          WHERE ap.appointment_timestamp BETWEEN ? AND ?
+          AND ap.doctor_id = ?
+          AND ap.is_deleted != 1
+          ORDER BY ap.appointment_id DESC
+        `;
+
+        const appointments = await executeQuery(tempCon, appointmentQuery, [
+          req.query.from,
+          req.query.to,
+          doctorId,
+        ]);
+
+        // Release the connection after executing queries
+        tempCon.release();
+        console.log({
+          doctorId,
+          appointments,
+        });
+        // Return response
+        resolve({
+          doctorId,
+          appointments,
+        });
+      } catch (error) {
+        tempCon.release();
+        console.error("Error fetching doctor's appointments:", error);
+        reject(error);
+      }
+    });
+  });
+}
+
+module.exports = { addAppointment, getAppointment, getDoctorsAppointments };

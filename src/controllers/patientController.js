@@ -1,6 +1,10 @@
 var express = require("express");
 var router = express.Router();
-const { getPatient, getDiagnosis } = require("../models/patientModel");
+const {
+  getPatient,
+  getDiagnosis,
+  getReference,
+} = require("../models/patientModel");
 
 router.get("/", async (req, res, next) => {
   try {
@@ -14,6 +18,15 @@ router.get("/", async (req, res, next) => {
 router.get("/diagnosis", async (req, res, next) => {
   try {
     const result = await getDiagnosis(req);
+    res.status(200).send(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/reference", async (req, res, next) => {
+  try {
+    const result = await getReference(req);
     res.status(200).send(result);
   } catch (err) {
     next(err);

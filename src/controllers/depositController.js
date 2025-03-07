@@ -13,6 +13,7 @@ router.get("/", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
+    console.log("Deposit controller:", req.body);
     const result = await cashDeposit(req);
     res.status(200).send(result);
   } catch (err) {

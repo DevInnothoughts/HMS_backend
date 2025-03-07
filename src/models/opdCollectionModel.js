@@ -153,7 +153,7 @@ const getMergedData = async (connection, fromDate, toDate) => {
 
     // Process IPD data
     ipdResults.forEach((ipd) => {
-      const dateKey = new Date(ipd.date).toLocaleDateString("en-CA"); // No need to split, date is already correct
+      const dateKey = new Date(ipd.date).toISOString().split("T")[0]; // new Date(ipd.date).toLocaleDateString("en-CA"); // No need to split, date is already correct
       if (!mergedData[dateKey]) {
         mergedData[dateKey] = {
           date: dateKey,

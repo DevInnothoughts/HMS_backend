@@ -47,6 +47,53 @@ const getIPDCollection = async (req) => {
   }
 };
 
+const getIPDBills = async (req) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  const { connection, location } = getConnectionByLocation(req.query.location); // Ensure `req.params.location` is correct
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    // Using a promise-based approach to handle the connection
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) {
+          return reject(err);
+        }
+
+        const sql = `
+          SELECT i.invoice_id, i.patient_id, p.name,p.phone,p.sex, i.discount, i.status, i.payable_amt, i.totalamt
+          FROM invoice i
+          JOIN patient p ON i.patient_id = p.patient_id
+          WHERE i.creation_date >= ?  
+          AND i.creation_date <= ?
+          AND i.is_deleted != 1
+        `;
+
+        const queryParams = [req.query.from, req.query.to]; // Parameters for the SQL query
+
+        tempCon.query(sql, queryParams, (error, rows) => {
+          tempCon.release();
+          if (error) {
+            return reject(error);
+          }
+          resolve(rows);
+        });
+      });
+    });
+    console.log(rows);
+    return rows;
+  } catch (error) {
+    throw error;
+  }
+};
+
 const getTotalIPDCollection = async (req) => {
   const { connection, location } = getConnectionByLocation(req.query.location); // Ensure `req.params.location` is correct
 
@@ -96,4 +143,4 @@ const getTotalIPDCollection = async (req) => {
   }
 };
 
-module.exports = { getIPDCollection, getTotalIPDCollection };
+module.exports = { getIPDCollection, getTotalIPDCollection, getIPDBills };

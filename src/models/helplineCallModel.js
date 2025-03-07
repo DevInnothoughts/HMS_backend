@@ -1,6 +1,6 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 
-const getIVRCall = async (req) => {
+const getHelplineCall = async (req) => {
   const { connection, location } = getConnectionByLocation(req.query.location); // Ensure `req.params.location` is correct
 
   if (!connection) {
@@ -18,14 +18,14 @@ const getIVRCall = async (req) => {
         }
 
         const sql = `
-          SELECT ivr_id, call_date, call_duration, call_status, call_time, caller_no, circle_name, destination_name, destination_no, note
-          FROM IVRdata
-          WHERE STR_TO_DATE(call_date, '%Y-%d-%m') >= ?
-          AND destination_no != ''
-          ORDER BY ivr_id DESC
+          SELECT *
+          FROM phonecalllogs
+          WHERE timestamp >= ?
+          
+          ORDER BY timestamp DESC
         `;
 
-        const queryParams = [req.query.from]; // Parameters for the SQL query
+        const queryParams = [new Date(req.query.from).getTime()]; // Parameters for the SQL query
 
         tempCon.query(sql, queryParams, (error, rows) => {
           tempCon.release();
@@ -43,4 +43,4 @@ const getIVRCall = async (req) => {
   }
 };
 
-module.exports = { getIVRCall };
+module.exports = { getHelplineCall };
