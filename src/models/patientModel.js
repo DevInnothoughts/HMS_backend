@@ -166,6 +166,8 @@ async function getReference(req) {
         old_ref: "Old Patient Referral",
         other: "Other",
         WOM: "Word of Mouth",
+        self_old_pt: "Old Patient",
+        hhc_branch: "HHC Branch",
         null: "Unknown",
       };
 

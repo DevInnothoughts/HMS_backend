@@ -143,4 +143,79 @@ const getTotalIPDCollection = async (req) => {
   }
 };
 
-module.exports = { getIPDCollection, getTotalIPDCollection, getIPDBills };
+const getIPDDueList = async (req) => {
+  const { connection, location } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+
+        const sql = `
+          SELECT 
+              p.patient_id,
+              p.name,
+              i.invoice_id,
+              i.creation_date,
+              i.totalamt,
+              i.totaldue,
+              CASE 
+                WHEN DATEDIFF(CURDATE(), i.creation_date) > 90 THEN '>90 days'
+                WHEN DATEDIFF(CURDATE(), i.creation_date) > 60 THEN '>60 days'
+                WHEN DATEDIFF(CURDATE(), i.creation_date) > 30 THEN '>30 days'
+                ELSE '<30 days'
+              END AS due_category
+          FROM patient p
+          JOIN invoice i ON p.patient_id = i.patient_id
+          WHERE i.totaldue > 0
+          AND i.creation_date >= '2024-04-01'
+          ORDER BY due_category, i.creation_date
+        `;
+
+        tempCon.query(sql, (error, rows) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(rows);
+        });
+      });
+    });
+
+    // Initialize category buckets with totals
+    const groupedPatients = {
+      ">90 days": { patients: [], totalDue: 0 },
+      ">60 days": { patients: [], totalDue: 0 },
+      ">30 days": { patients: [], totalDue: 0 },
+      "<30 days": { patients: [], totalDue: 0 },
+    };
+
+    // Populate buckets and sum totaldue
+    rows.forEach((patient) => {
+      const category = patient.due_category;
+      if (groupedPatients[category]) {
+        groupedPatients[category].patients.push(patient);
+
+        // Ensure totaldue is treated as a number
+        const totalDueValue = Number(patient.totaldue) || 0;
+        groupedPatients[category].totalDue += totalDueValue;
+      }
+    });
+
+    console.log(groupedPatients);
+    return groupedPatients;
+  } catch (error) {
+    throw error;
+  }
+};
+
+module.exports = {
+  getIPDCollection,
+  getTotalIPDCollection,
+  getIPDBills,
+  getIPDDueList,
+};

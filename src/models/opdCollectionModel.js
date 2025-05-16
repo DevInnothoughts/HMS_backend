@@ -37,7 +37,14 @@ const getOPDCollection = async (req) => {
           if (error) {
             return reject(error);
           }
-          resolve(rows);
+          // Convert UPI to Online
+          const modifiedRows = rows.map((row) => ({
+            ...row,
+            payment_mode:
+              row.payment_mode === "UPI" ? "Online" : row.payment_mode,
+          }));
+
+          resolve(modifiedRows);
         });
       });
     });
@@ -85,7 +92,7 @@ const getMergedData = async (connection, fromDate, toDate) => {
         ip.item_date AS date,
         SUM(CASE WHEN ip.payment_mode = 'Cash' THEN ip.total ELSE 0 END) AS total_cash,
         SUM(CASE WHEN ip.payment_mode = 'Card' THEN ip.total ELSE 0 END) AS total_card,
-        SUM(CASE WHEN ip.payment_mode = 'Online' THEN ip.total ELSE 0 END) AS total_online
+        SUM(CASE WHEN ip.payment_mode IN ('Online', 'UPI') THEN ip.total ELSE 0 END) AS total_online
       FROM patient_itemreceipt ip
       JOIN patient p ON ip.patient_id = p.patient_id
       WHERE ip.is_deleted != 1

@@ -5,6 +5,7 @@ const {
   getIPDCollection,
   getTotalIPDCollection,
   getIPDBills,
+  getIPDDueList,
 } = require("../models/ipdCollectionModel");
 
 router.get("/", async (req, res, next) => {
@@ -38,6 +39,17 @@ router.get("/getTotal", async (req, res, next) => {
   try {
     const TotalIPDCollection = await getTotalIPDCollection(req);
     res.status(200).send(TotalIPDCollection);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/dueList", async (req, res, next) => {
+  console.log(req.query.location);
+
+  try {
+    const IPDBills = await getIPDDueList(req);
+    res.status(200).send(IPDBills);
   } catch (err) {
     next(err);
   }

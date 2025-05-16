@@ -298,10 +298,10 @@ async function getDailyOPDCollection(req) {
       `;
       const onlineTotalQuery = `
         SELECT SUM(total) AS Total
-        FROM patient_itemreceipt
-        WHERE item_date = ?
-          AND payment_mode = 'Online'
-          AND is_deleted != 1
+  FROM patient_itemreceipt
+  WHERE item_date = ?
+    AND payment_mode IN ('Online', 'UPI')
+    AND is_deleted != 1
       `;
       const chequeTotalQuery = `
         SELECT SUM(total) AS Total
@@ -321,6 +321,43 @@ async function getDailyOPDCollection(req) {
         (cashTotal[0].Total || 0) +
         (cardTotal[0].Total || 0) +
         (onlineTotal[0].Total || 0);
+
+      // Total cash, card, online, and Paytm
+      const labCashTotalQuery = `
+        SELECT SUM(totalamt) AS Total
+        FROM patient_receipt
+        WHERE receipt_date = ?
+          AND paymentmode = 'Cash'
+          AND chargeCondition = 'LabTest'
+          AND is_deleted != 1
+      `;
+      const labCardTotalQuery = `
+        SELECT SUM(totalamt) AS Total
+        FROM patient_receipt
+        WHERE receipt_date = ?
+          AND paymentmode = 'Card'
+          AND chargeCondition = 'LabTest'
+          AND is_deleted != 1
+      `;
+      const labOnlineTotalQuery = `
+        SELECT SUM(totalamt) AS Total
+FROM patient_receipt
+WHERE receipt_date = ?
+  AND paymentmode IN ('Online', 'UPI')
+  AND chargeCondition = 'LabTest'
+  AND is_deleted != 1
+      `;
+
+      const [labCashTotal, labCardTotal, labOnlineTotal] = await Promise.all([
+        executeQuery(labCashTotalQuery, [currentDate]),
+        executeQuery(labCardTotalQuery, [currentDate]),
+        executeQuery(labOnlineTotalQuery, [currentDate]),
+      ]);
+
+      const labCashtablesum =
+        (labCashTotal[0].Total || 0) +
+        (labCardTotal[0].Total || 0) +
+        (labOnlineTotal[0].Total || 0);
 
       const queries = [
         "SELECT SUM(total) AS MCDPA FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'MCDPA'",
@@ -458,6 +495,12 @@ async function getDailyOPDCollection(req) {
           ["Card", cardTotal[0].Total || 0],
           ["Online", onlineTotal[0].Total || 0],
           ["Total", cashtablesum],
+        ],
+        labCollection: [
+          ["Cash", labCashTotal[0].Total || 0],
+          ["Card", labCardTotal[0].Total || 0],
+          ["Online", labOnlineTotal[0].Total || 0],
+          ["Total", labCashtablesum],
         ],
       };
     } catch (error) {

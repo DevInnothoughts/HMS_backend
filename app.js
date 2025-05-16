@@ -13,6 +13,7 @@ const IVRController = require("./src/controllers/ivrCallController");
 const HelplineController = require("./src/controllers/helplineCallController");
 const ConvincingScoreController = require("./src/controllers/convincingScoreController");
 const CallingListController = require("./src/controllers/callingListController");
+const leadManagementController = require("./src/controllers/leadManagementController");
 
 app.use(express.json());
 app.use(cors());
@@ -30,6 +31,7 @@ app.use("/hms/IVRCall", IVRController);
 app.use("/hms/HelplineCall", HelplineController);
 app.use("/hms/ConvincingScore", ConvincingScoreController);
 app.use("/hms/callingList", CallingListController);
+app.use("/hms/leadManagement", leadManagementController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
