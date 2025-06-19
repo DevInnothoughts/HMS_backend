@@ -35,6 +35,7 @@ const conLucknow = createPool("hmsLucknowDB");
 const conKalaburagi = createPool("hmsKalaburagiDB");
 const conRajajiNagar = createPool("hmsRajajinagarDB");
 const conSarjapura = createPool("hmsSarjapuraDB");
+const conKatraj = createPool("hmsKatrajDB");
 const conLead = createPool("hhc_appointments");
 
 const getConnectionByLocation = (loc) => {
@@ -248,6 +249,11 @@ const getConnectionByLocation = (loc) => {
     case "Sarjapura":
       connection = conSarjapura;
       location = "Sarjapura";
+      break;
+
+    case "Katraj":
+      connection = conKatraj;
+      location = "Katraj";
       break;
 
     case "lead":

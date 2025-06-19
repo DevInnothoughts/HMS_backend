@@ -174,7 +174,7 @@ const getIPDDueList = async (req) => {
           FROM patient p
           JOIN invoice i ON p.patient_id = i.patient_id
           WHERE i.totaldue > 0
-          AND i.creation_date >= '2024-04-01'
+          AND i.creation_date >= '2025-04-01'
           ORDER BY due_category, i.creation_date
         `;
 
