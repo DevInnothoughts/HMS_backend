@@ -322,31 +322,59 @@ async function getDailyOPDCollection(req) {
         (cardTotal[0].Total || 0) +
         (onlineTotal[0].Total || 0);
 
-      // Total cash, card, online, and Paytm
-      const labCashTotalQuery = `
-        SELECT SUM(totalamt) AS Total
-        FROM patient_receipt
-        WHERE receipt_date = ?
-          AND paymentmode = 'Cash'
-          AND chargeCondition = 'LabTest'
-          AND is_deleted != 1
-      `;
-      const labCardTotalQuery = `
-        SELECT SUM(totalamt) AS Total
-        FROM patient_receipt
-        WHERE receipt_date = ?
-          AND paymentmode = 'Card'
-          AND chargeCondition = 'LabTest'
-          AND is_deleted != 1
-      `;
-      const labOnlineTotalQuery = `
-        SELECT SUM(totalamt) AS Total
-FROM patient_receipt
-WHERE receipt_date = ?
-  AND paymentmode IN ('Online', 'UPI')
-  AND chargeCondition = 'LabTest'
-  AND is_deleted != 1
-      `;
+      let labCashTotalQuery, labCardTotalQuery, labOnlineTotalQuery;
+
+      if (location === "DP Road") {
+        labCashTotalQuery = `
+            SELECT SUM(totalamt) AS Total
+            FROM patient_receipt
+            WHERE receipt_date = ?
+              AND paymentmode = 'Cash'
+              AND chargeCondition = 'LabTest'
+              AND is_deleted != 1
+          `;
+        labCardTotalQuery = `
+            SELECT SUM(totalamt) AS Total
+            FROM patient_receipt
+            WHERE receipt_date = ?
+              AND paymentmode = 'Card'
+              AND chargeCondition = 'LabTest'
+              AND is_deleted != 1
+          `;
+        labOnlineTotalQuery = `
+            SELECT SUM(totalamt) AS Total
+            FROM patient_receipt
+            WHERE receipt_date = ?
+              AND paymentmode IN ('Online', 'UPI')
+              AND chargeCondition = 'LabTest'
+              AND is_deleted != 1
+          `;
+      } else {
+        labCashTotalQuery = `
+            SELECT SUM(total) AS Total
+            FROM patient_itemreceipt
+            WHERE item_date = ?
+              AND payment_mode = 'Cash'
+              AND consultation = 'LAB'
+              AND is_deleted != 1
+          `;
+        labCardTotalQuery = `
+            SELECT SUM(total) AS Total
+            FROM patient_itemreceipt
+            WHERE item_date = ?
+              AND payment_mode = 'Card'
+              AND consultation = 'LAB'
+              AND is_deleted != 1
+          `;
+        labOnlineTotalQuery = `
+            SELECT SUM(total) AS Total
+            FROM patient_itemreceipt
+            WHERE item_date = ?
+              AND payment_mode IN ('Online', 'UPI', 'Paytm')
+              AND consultation = 'LAB'
+              AND is_deleted != 1
+          `;
+      }
 
       const [labCashTotal, labCardTotal, labOnlineTotal] = await Promise.all([
         executeQuery(labCashTotalQuery, [currentDate]),

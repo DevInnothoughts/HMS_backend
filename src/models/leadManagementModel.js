@@ -145,6 +145,18 @@ async function getLeads(location) {
           LIMIT 100
         `;
       }
+      if (location === "Thane") {
+        query = `
+          SELECT *
+          FROM appointments 
+          WHERE (
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Kapurbawdi', '%')
+          )
+          ORDER BY appointment_id DESC
+          LIMIT 100
+        `;
+      }
 
       tempCon.query(query, queryParams, function (error, rows) {
         tempCon.release();

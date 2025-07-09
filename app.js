@@ -14,6 +14,7 @@ const HelplineController = require("./src/controllers/helplineCallController");
 const ConvincingScoreController = require("./src/controllers/convincingScoreController");
 const CallingListController = require("./src/controllers/callingListController");
 const leadManagementController = require("./src/controllers/leadManagementController");
+const approvalController = require("./src/controllers/approvalController");
 
 app.use(express.json());
 app.use(cors());
@@ -32,6 +33,7 @@ app.use("/hms/HelplineCall", HelplineController);
 app.use("/hms/ConvincingScore", ConvincingScoreController);
 app.use("/hms/callingList", CallingListController);
 app.use("/hms/leadManagement", leadManagementController);
+app.use("/hms/approval", approvalController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

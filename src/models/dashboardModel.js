@@ -1,4 +1,5 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { getApprovalDetails } = require("./approvalModel");
 
 async function getDashboardValues(req) {
   const { connection, location } = getConnectionByLocation(req.query.location);
@@ -6,9 +7,6 @@ async function getDashboardValues(req) {
     new Date(req.query.from).getTime(),
     new Date(req.query.to).getTime()
   );
-
-  // Get the current date in YYYY-MM-DD format
-  const currentDate = new Date().toISOString().split("T")[0];
 
   if (!connection) {
     const err = new Error("Invalid location");
@@ -188,6 +186,8 @@ AND p.is_deleted != 1;
         executeQuery(totalPatientCountQuery),
       ]);
 
+      const approvalStatus = await getApprovalDetails(req.query.location);
+
       return {
         dailyOPDReport: {
           new: newPatientCount[0].newpatient,
@@ -206,6 +206,7 @@ AND p.is_deleted != 1;
           helpline_answered_count[0].helpline_answered_count,
         helpline_outgoing_count:
           helpline_outgoing_count[0].helpline_outgoing_count,
+        approvalStatus,
       };
     } catch (error) {
       console.error("Error executing queries:", error);
