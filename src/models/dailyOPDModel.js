@@ -402,6 +402,11 @@ async function getDailyOPDCollection(req) {
         "SELECT SUM(total) AS GASTROSCOPY FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'GASTROSCOPY'",
         "SELECT SUM(total) AS ANAL3D FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = '3D ENDO ANAL IMAGING'",
         "SELECT SUM(total) AS PR FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'PROCEDURE'",
+        "SELECT SUM(total) AS ECG FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'ECG'",
+        "SELECT SUM(total) AS NUTRITIONIST FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'NUTRITIONIST'",
+        "SELECT SUM(total) AS `BLOODTEST&ECG` FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND REPLACE(LOWER(consultation), ' ', '') = 'bloodtests+ecg'",
+        "SELECT SUM(total) AS DRESSING FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'DRESSING'",
+        "SELECT SUM(total) AS FITNESS FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'FITNESS'",
       ];
 
       const results = await Promise.all(
@@ -424,6 +429,11 @@ async function getDailyOPDCollection(req) {
           "GASTROSCOPY",
           "ANAL3D",
           "PR",
+          "ECG",
+          "NUTRITIONIST",
+          "BLOODTEST&ECG",
+          "DRESSING",
+          "FITNESS",
         ][index];
         consultationTotals[key] = result[0] ? result[0] : 0;
       });
@@ -517,6 +527,23 @@ async function getDailyOPDCollection(req) {
             consultationTotals.ANAL3D.ANAL3D,
           ],
           consultationTotals.PR.PR && ["PROCEDURE", consultationTotals.PR.PR],
+          consultationTotals.ECG.ECG && ["ECG", consultationTotals.ECG.ECG],
+          consultationTotals.NUTRITIONIST.NUTRITIONIST && [
+            "NUTRITIONIST",
+            consultationTotals.NUTRITIONIST.NUTRITIONIST,
+          ],
+          consultationTotals["BLOODTEST&ECG"]["BLOODTEST&ECG"] && [
+            "BLOODTEST & ECG",
+            consultationTotals["BLOODTEST&ECG"]["BLOODTEST&ECG"],
+          ],
+          consultationTotals.DRESSING.DRESSING && [
+            "DRESSING",
+            consultationTotals.DRESSING.DRESSING,
+          ],
+          consultationTotals.FITNESS.FITNESS && [
+            "FITNESS",
+            consultationTotals.FITNESS.FITNESS,
+          ],
         ].filter(Boolean), // This filters out any `false` values, including `undefined`
         overallCollection: [
           ["Cash", cashTotal[0].Total || 0],

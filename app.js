@@ -1,6 +1,7 @@
 var express = require("express");
 var app = express();
 const cors = require("cors");
+const cron = require("node-cron");
 const ipdCollectionController = require("./src/controllers/ipdCollectionController");
 const opdCollectionController = require("./src/controllers/opdCollectionController");
 const appointmentController = require("./src/controllers/appointmentController");
@@ -15,6 +16,46 @@ const ConvincingScoreController = require("./src/controllers/convincingScoreCont
 const CallingListController = require("./src/controllers/callingListController");
 const leadManagementController = require("./src/controllers/leadManagementController");
 const approvalController = require("./src/controllers/approvalController");
+const {
+  syncAppointments,
+  syncBotAppointments,
+} = require("./src/models/leadManagementModel");
+
+const locations = [
+  "DP Road",
+  "Andheri",
+  "Baner",
+  "Belgavi",
+  "Chakan",
+  "Chinchwad",
+  "Dighi",
+  "Gurgaon Sector 14",
+  "Gurgaon Sector 49",
+  "Hinjewadi",
+  "HSR",
+  "Hyderabad",
+  "Indiranagar",
+  "Indore",
+  "JP Nagar",
+  "Kalaburagi",
+  "Kolhapur",
+  "Latur",
+  "Ludhiana",
+  "Lucknow",
+  "Mysore",
+  "Nashik",
+  "Navi Mumbai",
+  "Salunke Vihar",
+  "Sahakar Nagar",
+  "Secunderabad",
+  "Surat",
+  "Thane",
+  "Undri",
+  "Vashi",
+  "Rajaji Nagar",
+  "Sarjapura",
+  "Katraj",
+];
 
 app.use(express.json());
 app.use(cors());
@@ -39,6 +80,15 @@ app.use("/hms/approval", approvalController);
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(err.status || 500).send(err.message || "Something went wrong!");
+});
+
+// Schedule every 3 hours (at minute 0 of hour 0, 3, 6, 9, 12, 15, 18, 21)
+cron.schedule("*/3 * * * *", () => {
+  locations.forEach((location) => {
+    //console.log(`🔁 Running sync for location: ${location}`);
+    syncAppointments(location);
+    syncBotAppointments(location);
+  });
 });
 
 // Start the server

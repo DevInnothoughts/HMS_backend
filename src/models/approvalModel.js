@@ -130,6 +130,7 @@ const getCallAndWebData = async (req) => {
     ]);
 
     const webLeads = await getLeads(req.query.location);
+    const botLeads = await getBotLeads(req.query.location);
 
     // Return structured result
     return {
@@ -143,6 +144,7 @@ const getCallAndWebData = async (req) => {
       helpline_outgoing_count:
         helplineOutgoingCount[0]?.helpline_outgoing_count || 0,
       webLeads,
+      botLeads,
     };
   } catch (error) {
     console.error("Error in getCallAndWebData:", error);
@@ -300,6 +302,129 @@ async function getLeads(location) {
     };
   } catch (err) {
     console.error("Error fetching lead data:", err);
+    throw err;
+  }
+}
+
+async function getBotLeads(location) {
+  const { connection } = getConnectionByLocation("lead");
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  const { start, end } = getYesterdayDateTimeRange();
+
+  const baseConditions = {
+    "DP Road": ["DP Road", "Tilak Road", "Dhole Patil Road"],
+    "Salunke Vihar": ["Salunke Vihar", "Salunkhe Vihar", "Wanowrie"],
+    Hinjewadi: ["Hinjewadi", "Hinjawadi"],
+    HSR: ["HSR", "HSR Layout"],
+    Sarjapura: ["Sarjapura", "Sarjapur"],
+    "Rajaji Nagar": ["Rajaji Nagar", "Rajajinagar"],
+    Belgavi: ["Belgavi", "Belagavi"],
+    "Gurgaon Sector 14": ["Gurgaon Sector 14", "Gurugram - Sector 14"],
+    "Gurgaon Sector 49": ["Gurgaon Sector 49", "Gurugram - Sector 49"],
+    Hyderabad: ["Hyderabad", "Jubilee Hills"],
+    Chinchwad: ["Chinchwad", "Pimpri-Chinchwad"],
+  };
+
+  const areas = baseConditions[location] || [location];
+  let areaConditions;
+  let areaParams;
+
+  if (location === "Vashi") {
+    areaConditions = areas
+      .map(() => `(branch LIKE ? OR chat_whatsapp_branch LIKE ?)`)
+      .join(" OR ");
+
+    // Add extra condition for blank branches
+    areaConditions += " OR (branch = '' AND chat_whatsapp_branch = '')";
+
+    areaParams = areas.flatMap((area) => [`%${area}%`, `%${area}%`]);
+  } else {
+    areaConditions = areas
+      .map(() => `(branch LIKE ? OR chat_whatsapp_branch LIKE ?)`)
+      .join(" OR ");
+    areaParams = areas.flatMap((area) => [`%${area}%`, `%${area}%`]);
+  }
+
+  const dateCondition = `datetime BETWEEN ? AND ?`;
+
+  const executeCountQuery = (sql, params) =>
+    new Promise((resolve, reject) => {
+      connection.query(sql, params, (err, results) => {
+        if (err) return reject(err);
+        resolve(results[0]?.count || 0);
+      });
+    });
+
+  const fetchLeadRecords = (sql, params) =>
+    new Promise((resolve, reject) => {
+      connection.query(sql, params, (err, results) => {
+        if (err) return reject(err);
+        resolve(results);
+      });
+    });
+
+  const baseQuery = `
+    SELECT COUNT(*) AS count
+    FROM chatbot_leads
+    WHERE (${areaConditions}) AND ${dateCondition}
+  `;
+
+  const statusQuery = (status) => `
+    SELECT COUNT(*) AS count
+    FROM chatbot_leads
+    WHERE (${areaConditions}) AND ${dateCondition} AND status = ?
+  `;
+
+  const leadsDetailQuery = `
+    SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, disease, chat_whatsapp_branch, query AS message, status, note
+    FROM chatbot_leads
+    WHERE (${areaConditions}) AND ${dateCondition}
+    ORDER BY datetime DESC
+  `;
+
+  try {
+    const [totalLeads, enquiryCount, appointmentCount, botLeads] =
+      await Promise.all([
+        executeCountQuery(baseQuery, [...areaParams, start, end]),
+        executeCountQuery(statusQuery("Enquiry"), [
+          ...areaParams,
+          start,
+          end,
+          "Enquiry",
+        ]),
+        executeCountQuery(statusQuery("Appointment"), [
+          ...areaParams,
+          start,
+          end,
+          "Appointment",
+        ]),
+        fetchLeadRecords(leadsDetailQuery, [...areaParams, start, end]),
+      ]);
+
+    // Append message prefix for empty-branch records if location is Vashi
+    if (location === "Vashi") {
+      botLeads.forEach((row) => {
+        if (!row.branch && !row.chat_whatsapp_branch) {
+          row.message = `OTHER BRANCH - ${row.message}`;
+        }
+        row.selected_area = location;
+      });
+    }
+
+    return {
+      location,
+      totalLeads,
+      enquiryCount,
+      appointmentCount,
+      botLeads,
+    };
+  } catch (err) {
+    console.error("Error fetching chatbot lead summary:", err);
     throw err;
   }
 }
