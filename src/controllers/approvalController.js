@@ -7,6 +7,7 @@ const {
   addApprovalDetails,
   getApprovalDetails,
   getIPDReportData,
+  getApprovalStatusSummary,
 } = require("../models/approvalModel");
 
 router.get("/", async (req, res, next) => {
@@ -67,6 +68,16 @@ router.get("/ipdReport", async (req, res, next) => {
   try {
     const values = await getIPDReportData(req);
     console.log(values);
+    res.status(200).send(values);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/approvalStatusSummary", async (req, res, next) => {
+  try {
+    const values = await getApprovalStatusSummary(req);
+    //console.log(values);
     res.status(200).send(values);
   } catch (err) {
     next(err);

@@ -175,7 +175,7 @@ async function getAppointment(req) {
             p.name AS patient_name,
             d.name AS doctor_name
           FROM appointment ap
-          JOIN patient p ON ap.patient_id = p.patient_id
+          LEFT JOIN patient p ON ap.patient_id = p.patient_id
           LEFT JOIN doctor d ON ap.doctor_id = d.doctor_id
           WHERE ap.appointment_timestamp >= ?  
           AND ap.appointment_timestamp <= ?

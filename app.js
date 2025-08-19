@@ -20,6 +20,10 @@ const {
   syncAppointments,
   syncBotAppointments,
 } = require("./src/models/leadManagementModel");
+const {
+  getTomorrowsAppointment,
+  sendScheduledWhatsAppMsg,
+} = require("./src/models/patientModel");
 
 const locations = [
   "DP Road",
@@ -83,13 +87,45 @@ app.use((err, req, res, next) => {
 });
 
 // Schedule every 3 hours (at minute 0 of hour 0, 3, 6, 9, 12, 15, 18, 21)
-cron.schedule("*/3 * * * *", () => {
-  locations.forEach((location) => {
-    //console.log(`🔁 Running sync for location: ${location}`);
-    syncAppointments(location);
-    syncBotAppointments(location);
-  });
-});
+// cron.schedule("*/6 * * * *", () => {
+//   locations.forEach(async (location) => {
+//     //console.log(`🔁 Running sync for location: ${location}`);
+//     // syncAppointments(location);
+//     // syncBotAppointments(location);
+//   });
+// });
+
+// schedule: 30 20 * * * -> 8:30 PM every day. timezone Asia/Kolkata
+// cron.schedule(
+//   "30 20 * * *",
+//   async () => {
+//     await Promise.all(
+//       locations.map(async (loc) => {
+//         const appointments = await getTomorrowsAppointment(loc);
+
+//         console.log(
+//           `Location ${loc} has ${appointments.length} appointments for tommorrow.`
+//         );
+
+//         for (const appt of appointments) {
+//           await sendScheduledWhatsAppMsg(
+//             appt.patient_phone,
+//             appt.doctor_name,
+//             new Date(appt.appointment_timestamp).toLocaleDateString("en-CA", {
+//               timeZone: "Asia/Kolkata",
+//             }),
+//             appt.appointment_time,
+//             loc, // Use the correct location here
+//             appt.FDE_Name
+//           );
+//         }
+//       })
+//     );
+//   },
+//   {
+//     timezone: "Asia/Kolkata",
+//   }
+// );
 
 // Start the server
 const PORT = process.env.PORT || 5100;

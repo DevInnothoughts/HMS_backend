@@ -302,6 +302,7 @@ async function getChatBotLeads(location) {
           WHERE (
             (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%')) 
             OR (branch LIKE '%Gurugram - Sector 14%' OR chat_whatsapp_branch LIKE '%Gurugram - Sector 14%')
+             OR (branch LIKE '%Gurgaon Sector - 14%' OR chat_whatsapp_branch LIKE '%Gurgaon Sector - 14%')
           )
           ORDER BY id DESC
           LIMIT 100
@@ -316,6 +317,7 @@ async function getChatBotLeads(location) {
           WHERE (
             (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%')) 
             OR (branch LIKE '%Gurugram - Sector 49%' OR chat_whatsapp_branch LIKE '%Gurugram - Sector 49%')
+            OR (branch LIKE '%Gurgaon Sector - 49%' OR chat_whatsapp_branch LIKE '%Gurgaon Sector - 49%')
           )
           ORDER BY id DESC
           LIMIT 100
@@ -408,7 +410,7 @@ async function syncAppointments(location) {
           SELECT patient_phone, appointment_timestamp
           FROM appointment
           WHERE 
-            REPLACE(REPLACE(patient_phone, '+91', ''), '0', '') = ?
+            patient_phone = ?
             AND appointment_timestamp >= ?
           LIMIT 1
         `,
@@ -481,7 +483,7 @@ async function syncBotAppointments(location) {
           SELECT patient_phone, appointment_timestamp
           FROM appointment
           WHERE 
-            REPLACE(REPLACE(patient_phone, '+91', ''), '0', '') = ?
+            patient_phone = ?
             AND appointment_timestamp >= ?
           LIMIT 1
         `,
@@ -518,9 +520,394 @@ async function syncBotAppointments(location) {
   }
 }
 
+async function getDatewiseLeads(location, fromDate, toDate) {
+  const { connection: leadDB } = getConnectionByLocation("lead");
+  const { connection: clinicDB } = getConnectionByLocation(location);
+
+  console.log("From:", fromDate, "To:", toDate);
+
+  if (!leadDB || !clinicDB) {
+    const err = new Error("Invalid location: " + location);
+    err.status = 404;
+    throw err;
+  }
+
+  return new Promise((resolve, reject) => {
+    leadDB.getConnection(async function (err, tempCon) {
+      if (err) return reject(err);
+
+      try {
+        let dateParams = [
+          `${fromDate}T00:00:00+05:30`,
+          `${toDate}T23:59:59+05:30`,
+        ];
+        let areaConditions = "selected_area LIKE CONCAT('%', ?, '%')";
+        let areaParams = [location];
+
+        if (location === "DP Road") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Tilak Road', '%')
+            OR selected_area LIKE CONCAT('%', 'Dhole Patil Road', '%')
+          `;
+        } else if (location === "Salunke Vihar") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Wanowrie', '%')
+          `;
+        } else if (location === "Hinjewadi") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Hinjawadi', '%')
+          `;
+        } else if (location === "JP Nagar") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area = 'Bengaluru'
+          `;
+        } else if (location === "Sarjapura") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Sarjapur', '%')
+          `;
+        } else if (location === "Rajaji Nagar") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Rajajinagar', '%')
+          `;
+        } else if (location === "Belgavi") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Belagavi', '%')
+          `;
+        } else if (location === "Sahakar Nagar") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Sahakarnagar', '%')
+          `;
+        } else if (location === "Gurgaon Sector 14") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Gurugram - Sector 14', '%')
+          `;
+        } else if (location === "Gurgaon Sector 49") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Gurugram - Sector 49', '%')
+          `;
+        } else if (location === "Thane") {
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?) 
+            OR selected_area LIKE CONCAT('%', 'Kapurbawdi', '%')
+          `;
+        }
+
+        const query = `
+          SELECT *
+          FROM appointments
+          WHERE (${areaConditions})
+            AND date BETWEEN ? AND ?
+          ORDER BY appointment_id DESC
+        `;
+
+        let queryParams = [...areaParams, ...dateParams];
+
+        tempCon.query(query, queryParams, async function (error, rows) {
+          tempCon.release();
+          if (error) return reject(error);
+
+          const seen = new Set();
+          const allLeads = [];
+
+          for (const row of rows) {
+            const normalizedPhone =
+              row.phoneno?.replace(/^(\+91|91|0)/, "") || "";
+            if (!seen.has(normalizedPhone)) {
+              seen.add(normalizedPhone);
+              allLeads.push({
+                ...row,
+                selected_area: location,
+              });
+            }
+          }
+
+          // Count appointments from leads
+          const appointments = allLeads.filter(
+            (lead) => lead.status === "Appointment"
+          );
+
+          const appointmentPhones = appointments.map((a) =>
+            a.phoneno.replace(/^(\+91|91|0)/, "")
+          );
+
+          let actualVisits = 0;
+          let ipdCount = 0;
+          let visitedLeads = [];
+          let ipdLeads = [];
+
+          if (appointmentPhones.length > 0) {
+            const placeholders = appointmentPhones
+              .map(() => `patient_phone = ?`)
+              .join(" OR ");
+
+            // Phase 1: Get patient_id and patient_phone for confirmed new visits
+            const visitQuery = `
+            SELECT patient_id, patient_phone
+            FROM appointment
+            WHERE (${placeholders})
+            AND appointment_timestamp BETWEEN ? AND ?
+              AND confirm_time != 0
+              AND patient_type = 'New'
+          `;
+
+            const clinicQuery = util.promisify(clinicDB.query).bind(clinicDB);
+            const visitResults = await clinicQuery(visitQuery, [
+              ...appointmentPhones,
+              fromDate,
+              toDate,
+            ]);
+
+            actualVisits = visitResults.length;
+            visitedLeads = visitResults;
+
+            // Phase 2: Check if invoice exists for these patient_ids
+            const patientIds = visitResults.map((row) => row.patient_id);
+
+            if (patientIds.length > 0) {
+              const invoicePlaceholders = patientIds.map(() => `?`).join(",");
+
+              const invoiceQuery = `
+                SELECT DISTINCT i.patient_id, p.phone AS patient_phone
+          FROM invoice AS i
+          LEFT JOIN patient AS p
+            ON p.patient_id = i.patient_id
+          WHERE i.patient_id IN (${invoicePlaceholders})
+    `;
+
+              const invoiceResults = await clinicQuery(
+                invoiceQuery,
+                patientIds
+              );
+
+              ipdCount = invoiceResults.length;
+              ipdLeads = invoiceResults;
+            }
+          }
+
+          // Final stats
+          const stats = {
+            totalLeads: allLeads.length,
+            appointmentCount: appointments.length,
+            appointmentLeads: appointments,
+            visitedLeads: visitedLeads,
+            actualVisitCount: actualVisits,
+            ipdLeads: ipdLeads,
+            ipdCount: ipdCount,
+            leads: allLeads,
+          };
+          console.log(`📊 Datewise Leads Stats for ${location}:`, stats);
+          resolve(stats);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+async function getDatewiseBotLeads(location, fromDate, toDate) {
+  const { connection: leadDB } = getConnectionByLocation("lead");
+  const { connection: clinicDB } = getConnectionByLocation(location);
+
+  if (!leadDB || !clinicDB) {
+    const err = new Error("Invalid location: " + location);
+    err.status = 404;
+    throw err;
+  }
+
+  return new Promise((resolve, reject) => {
+    leadDB.getConnection(function (err, tempCon) {
+      if (err) return reject(err);
+
+      let query = `
+        SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, email, disease, chat_whatsapp_branch, query AS message, status, note
+        FROM chatbot_leads 
+        WHERE (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%'))
+          AND DATE(datetime) BETWEEN ? AND ?
+        ORDER BY id DESC
+      `;
+
+      let queryParams = [
+        location,
+        location,
+        `${fromDate}T00:00:00+05:30`,
+        `${toDate}T23:59:59+05:30`,
+      ];
+
+      // Custom location mappings (optional)
+      const locationMap = {
+        "DP Road": ["%Tilak Road%", "%Dhole Patil Road%"],
+        "Salunke Vihar": ["%Salunkhe Vihar%", "%Wanowrie%"],
+        Hinjewadi: ["%Hinjawadi%"],
+        HSR: ["%HSR Layout%"],
+        "Rajaji Nagar": ["%Rajajinagar%"],
+        Belgavi: ["%Belagavi%"],
+        Hyderabad: ["%Jubilee Hills%"],
+        "Gurgaon Sector 14": [
+          "%Gurugram - Sector 14%",
+          "%Gurgaon Sector - 14%",
+        ],
+        "Gurgaon Sector 49": [
+          "%Gurugram - Sector 49%",
+          "%Gurgaon Sector - 49%",
+        ],
+        Chinchwad: ["%Pimpri-Chinchwad%"],
+      };
+      if (location === "Vashi") {
+        query = `
+          SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno,  email, disease, chat_whatsapp_branch, query AS message, status, note
+          FROM chatbot_leads 
+          WHERE (
+            (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%')) 
+            OR (branch = '' AND chat_whatsapp_branch = '')
+          )
+          AND DATE(datetime) BETWEEN ? AND ?
+          ORDER BY id DESC
+          LIMIT 100
+        `;
+        queryParams = [
+          location,
+          location,
+          `${fromDate}T00:00:00+05:30`,
+          `${toDate}T23:59:59+05:30`,
+        ];
+      } else if (locationMap[location]) {
+        const extraConditions = locationMap[location]
+          .map(
+            (alias) =>
+              `(branch LIKE '${alias}' OR chat_whatsapp_branch LIKE '${alias}')`
+          )
+          .join(" OR ");
+
+        const baseCondition = `(branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%'))`;
+
+        query = `
+          SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, email, disease, chat_whatsapp_branch, query AS message, status, note
+          FROM chatbot_leads 
+          WHERE (${baseCondition}${
+          extraConditions ? ` OR ${extraConditions}` : ""
+        })
+            AND DATE(datetime) BETWEEN ? AND ?
+          ORDER BY id DESC
+        `;
+        queryParams = [
+          location,
+          location,
+          `${fromDate}T00:00:00+05:30`,
+          `${toDate}T23:59:59+05:30`,
+        ];
+      }
+
+      tempCon.query(query, queryParams, async function (error, rows) {
+        tempCon.release();
+        if (error) return reject(error);
+
+        const seen = new Set();
+        const allLeads = [];
+
+        for (const row of rows) {
+          const normalizedPhone =
+            row.phoneno?.replace(/^(\+91|91|0)/, "") || "";
+          if (!seen.has(normalizedPhone)) {
+            seen.add(normalizedPhone);
+            allLeads.push({
+              ...row,
+              selected_area: location,
+            });
+          }
+        }
+
+        const appointments = allLeads.filter(
+          (lead) => lead.status === "Appointment"
+        );
+
+        const appointmentPhones = appointments.map((a) =>
+          a.phoneno.replace(/^(\+91|91|0)/, "")
+        );
+
+        let actualVisits = 0;
+        let ipdCount = 0;
+        let visitedLeads = [];
+        let ipdLeads = [];
+
+        if (appointmentPhones.length > 0) {
+          const placeholders = appointmentPhones
+            .map(() => `patient_phone = ?`)
+            .join(" OR ");
+
+          // Phase 1: Get patient_id and patient_phone for confirmed new visits
+          const visitQuery = `
+            SELECT patient_id, patient_phone
+            FROM appointment
+            WHERE (${placeholders})
+            AND appointment_timestamp BETWEEN ? AND ?
+              AND confirm_time != 0
+              AND patient_type = 'New'
+          `;
+
+          const clinicQuery = util.promisify(clinicDB.query).bind(clinicDB);
+          const visitResults = await clinicQuery(visitQuery, [
+            ...appointmentPhones,
+            fromDate,
+            toDate,
+          ]);
+
+          actualVisits = visitResults.length;
+          visitedLeads = visitResults;
+
+          // Phase 2: Check if invoice exists for these patient_ids
+          const patientIds = visitResults.map((row) => row.patient_id);
+
+          if (patientIds.length > 0) {
+            const invoicePlaceholders = patientIds.map(() => `?`).join(",");
+
+            const invoiceQuery = `
+                  SELECT DISTINCT i.patient_id, p.phone AS patient_phone
+          FROM invoice AS i
+          LEFT JOIN patient AS p
+            ON p.patient_id = i.patient_id
+          WHERE i.patient_id IN (${invoicePlaceholders})
+                `;
+
+            const invoiceResults = await clinicQuery(invoiceQuery, patientIds);
+
+            ipdCount = invoiceResults.length;
+            ipdLeads = invoiceResults;
+          }
+        }
+
+        const stats = {
+          totalLeads: allLeads.length,
+          appointmentCount: appointments.length,
+          appointmentLeads: appointments,
+          visitedLeads: visitedLeads,
+          actualVisitCount: actualVisits,
+          ipdLeads: ipdLeads,
+          ipdCount: ipdCount,
+          leads: allLeads,
+        };
+        console.log(`📊 Datewise Bot Leads Stats for ${location}:`, stats);
+        resolve(stats);
+      });
+    });
+  });
+}
+
 module.exports = {
   getLeads,
   getChatBotLeads,
   syncAppointments,
   syncBotAppointments,
+  getDatewiseLeads,
+  getDatewiseBotLeads,
 };

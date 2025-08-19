@@ -100,6 +100,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.chargeCondition = 'DNC'
           AND appointment.patient_type = 'Follow'
           AND appointment.executivechk = 2
+          AND patient_receipt.is_deleted != 1
       `;
       const poDNCQuery = `
         SELECT COUNT(appointment.patient_type) AS PODNCCount
@@ -108,7 +109,9 @@ async function getDailyOPDCollection(req) {
         WHERE appointment.appointment_timestamp = ?
           AND patient_receipt.receipt_date = ?
           AND patient_receipt.chargeCondition = 'DNC'
+          AND appointment.confirm_time !=0
           AND appointment.patient_type = 'Postoperative'
+          AND patient_receipt.is_deleted != 1
       `;
 
       const [newDNCount, followDNCount, poDNCCount] = await Promise.all([
@@ -132,6 +135,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.chargeCondition = 'DNP'
           AND appointment.patient_type = 'New'
           AND appointment.executivechk = 2
+          AND patient_receipt.is_deleted != 1
       `;
       const followDNPQuery = `
         SELECT COUNT(appointment.patient_type) AS FollowDNPCount
@@ -142,6 +146,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.chargeCondition = 'DNP'
           AND appointment.patient_type = 'Follow'
           AND appointment.executivechk = 2
+          AND patient_receipt.is_deleted != 1
       `;
       const poDNPQuery = `
         SELECT COUNT(appointment.patient_type) AS PODNPCount
@@ -149,7 +154,9 @@ async function getDailyOPDCollection(req) {
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE patient_receipt.receipt_date = ?
           AND patient_receipt.chargeCondition = 'DNP'
+          AND appointment.confirm_time !=0
           AND appointment.patient_type = 'Postoperative'
+          AND patient_receipt.is_deleted != 1
       `;
 
       const [newDNPCount, followDNPCount, poDNPCount] = await Promise.all([
@@ -172,6 +179,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.chargeCondition = 'DNW'
           AND appointment.patient_type = 'New'
           AND appointment.executivechk = 2
+          AND patient_receipt.is_deleted != 1
       `;
       const followDNWQuery = `
         SELECT COUNT(appointment.patient_type) AS FollowDNWCount
@@ -181,6 +189,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.chargeCondition = 'DNW'
           AND appointment.patient_type = 'Follow'
           AND appointment.executivechk = 2
+          AND patient_receipt.is_deleted != 1
       `;
       const poDNWQuery = `
         SELECT COUNT(appointment.patient_type) AS PODNWCount
@@ -188,7 +197,9 @@ async function getDailyOPDCollection(req) {
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE patient_receipt.receipt_date = ?
           AND patient_receipt.chargeCondition = 'DNW'
+          AND appointment.confirm_time !=0
           AND appointment.patient_type = 'Postoperative'
+          AND patient_receipt.is_deleted != 1
       `;
 
       const [newDNWCount, followDNWCount, poDNWCount] = await Promise.all([

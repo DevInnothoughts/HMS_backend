@@ -92,9 +92,14 @@ const getIPDCollectionV2 = async (req) => {
             ip.chequeamt,
             ip.onlineamt,
             ip.discountamt,
-            p.name
+            ip.tdsamt,
+            p.name,
+            i.totalamt,
+            i.totaldue,
+            i.status
           FROM ipd_payment ip
           JOIN patient p ON ip.patient_id = p.patient_id
+          JOIN invoice i ON ip.invoice_id = i.invoice_id
           WHERE ip.receipt_date BETWEEN ? AND ?
           ORDER BY ip.receipt_date DESC;
         `;
@@ -409,6 +414,7 @@ const getStatuswiseIPDDueList = async (req) => {
               i.creation_date,
               i.totalamt,
               i.totaldue,
+              ic.companyname,
               CASE 
                 WHEN DATEDIFF(CURDATE(), i.creation_date) > 90 THEN '>90 days'
                 WHEN DATEDIFF(CURDATE(), i.creation_date) > 60 THEN '>60 days'
@@ -417,6 +423,7 @@ const getStatuswiseIPDDueList = async (req) => {
               END AS due_category
           FROM patient p
           JOIN invoice i ON p.patient_id = i.patient_id
+          LEFT JOIN insurance_company ic ON i.insurancecompany = ic.comapny_id
           WHERE i.totaldue > 0
             AND i.creation_date >= '2025-04-01'
         `;
@@ -489,7 +496,7 @@ const getIPDTotalSummary = async (req) => {
                  AND is_deleted != 1 
                  AND status = ?) AS total_invoice_amount,
 
-              (SELECT SUM(p.cashamt + p.cardamt + p.chequeamt + p.onlineamt + p.discountamt)
+              (SELECT SUM(p.cashamt + p.cardamt + p.chequeamt + p.onlineamt + p.discountamt + p.tdsamt)
                FROM ipd_payment p
                JOIN invoice i ON p.invoice_id = i.invoice_id
                WHERE p.receipt_date >= '2025-04-01'
@@ -510,7 +517,7 @@ const getIPDTotalSummary = async (req) => {
                WHERE creation_date >= '2025-04-01' 
                  AND is_deleted != 1) AS total_invoice_amount,
 
-              (SELECT SUM(p.cashamt + p.cardamt + p.chequeamt + p.onlineamt + p.discountamt)
+              (SELECT SUM(p.cashamt + p.cardamt + p.chequeamt + p.onlineamt + p.discountamt + p.tdsamt)
                FROM ipd_payment p
                JOIN invoice i ON p.invoice_id = i.invoice_id
                WHERE p.receipt_date >= '2025-04-01') AS total_collection_amount,

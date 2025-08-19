@@ -1,12 +1,33 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 const { getApprovalDetails } = require("./approvalModel");
 
+const excludedNumbers = [
+  "+917411951943",
+  "+918123922650",
+  "+917411804875",
+  "+918147647685",
+  "+917411951965",
+  "+917411805024",
+  "+917411951962",
+  "+918971928968",
+  "+918123919853",
+  "+918123919853",
+  "+918147647677",
+  "+917411951963",
+  "+918792498991",
+  "+919164045999",
+  "+918855865060",
+  "+918888188885",
+]; //
+
 async function getDashboardValues(req) {
   const { connection, location } = getConnectionByLocation(req.query.location);
-  console.log(
-    new Date(req.query.from).getTime(),
-    new Date(req.query.to).getTime()
-  );
+  console.log(req.query.from, req.query.to);
+
+  const fromDate = req.query.from;
+  const toDate = req.query.to;
+  const startOfDay = new Date(`${fromDate}T00:00:00+05:30`).getTime();
+  const endOfDay = new Date(`${toDate}T23:59:59+05:30`).getTime();
 
   if (!connection) {
     const err = new Error("Invalid location");
@@ -50,7 +71,7 @@ AND p.is_deleted != 1;
   AND ap.appointment_timestamp <= ?
           AND patient_type = 'New'
           AND is_deleted != 1
-          AND executivechk = 2
+          AND confirm_time != '0'
       `;
       const followPatientCountQuery = `
         SELECT COUNT(patient_type) AS followpatient
@@ -59,7 +80,7 @@ AND p.is_deleted != 1;
   AND ap.appointment_timestamp <= ?
           AND patient_type = 'Follow'
           AND is_deleted != 1
-          AND executivechk = 2
+          AND confirm_time != '0'
       `;
       const poPatientCountQuery = `
         SELECT COUNT(patient_type) AS popatient
@@ -68,7 +89,7 @@ AND p.is_deleted != 1;
   AND ap.appointment_timestamp <= ?
           AND patient_type = 'Postoperative'
           AND is_deleted != 1
-          AND executivechk = 2
+         AND confirm_time != '0'
       `;
 
       // Proctoscopy count
@@ -115,6 +136,17 @@ AND p.is_deleted != 1;
   AND call_status = 'Missed'
    AND destination_no != ''
   `;
+
+      const AttendedMissedCallCountQuery = `
+    SELECT 
+      COUNT(*) AS attended_missed_count
+    FROM IVRdata i
+   WHERE STR_TO_DATE(i.call_date, "%Y-%d-%m") >= ?
+    AND STR_TO_DATE(i.call_date, "%Y-%d-%m") <= ?
+    AND call_status = 'Missed'
+    AND destination_no != ''
+    AND (status !='' OR note != '')
+  `;
       const AnsweredCallCountQuery = `
     SELECT 
       COUNT(*) AS answered_count
@@ -129,24 +161,50 @@ AND p.is_deleted != 1;
     SELECT 
       COUNT(*) AS helpline_missed_count
     FROM phonecalllogs p
-   WHERE p.timestamp >= ?
- 
-  AND p.type = 'MISSED'
+   WHERE timestamp BETWEEN ? AND ?
+  AND p.phoneNumber NOT IN (${excludedNumbers.map(() => "?").join(",")})
+  AND (p.type = 'MISSED' OR p.type = 'UNKNOWN')
   `;
+
+      const HelplineAttendedMissedCallCountQuery = `
+          SELECT
+            COUNT(*) AS helpline_attended_missed_count
+          FROM phonecalllogs p
+         WHERE timestamp BETWEEN ? AND ?
+           AND note IS NOT NULL
+          AND note <> ''
+          AND p.type IN ('MISSED', 'UNKNOWN')
+           AND p.phoneNumber NOT IN (${excludedNumbers
+             .map(() => "?")
+             .join(",")})
+        `;
+      //         `SELECT COUNT(DISTINCT p1.phoneNumber) AS helpline_attended_missed_count
+      // FROM phonecalllogs p1
+      // WHERE p1.timestamp BETWEEN ? AND ?
+      //   AND p1.phoneNumber NOT IN (${excludedNumbers.map(() => "?").join(",")})
+      //   AND (p1.type = 'MISSED' OR p1.type = 'UNKNOWN')
+      //   AND EXISTS (
+      //     SELECT 1
+      //     FROM phonecalllogs p2
+      //     WHERE p2.timestamp BETWEEN ? AND ?
+      //       AND p2.phoneNumber = p1.phoneNumber
+      //       AND p2.type = 'OUTGOING'
+      //   )`;
+
       const HelplineAnsweredCallCountQuery = `
     SELECT 
       COUNT(*) AS helpline_answered_count
     FROM phonecalllogs p
-   WHERE p.timestamp >= ?
-  
+   WHERE timestamp BETWEEN ? AND ?
+   AND p.phoneNumber NOT IN (${excludedNumbers.map(() => "?").join(",")})
   AND p.type = 'INCOMING'
   `;
       const HelplineOutgoingCallCountQuery = `
     SELECT 
       COUNT(*) AS helpline_outgoing_count
     FROM phonecalllogs p
-   WHERE p.timestamp >= ?
-  
+   WHERE timestamp BETWEEN ? AND ?
+   AND p.phoneNumber NOT IN (${excludedNumbers.map(() => "?").join(",")})
   AND p.type = 'OUTGOING'
   `;
 
@@ -159,8 +217,10 @@ AND p.is_deleted != 1;
         ipd_count,
         dc_count,
         missed_count,
+        attended_missed_count,
         answered_count,
         helpline_missed_count,
+        helpline_attended_missed_count,
         helpline_answered_count,
         helpline_outgoing_count,
         totalPatientCount,
@@ -173,15 +233,32 @@ AND p.is_deleted != 1;
         executeQuery(ipdCountQuery, [req.query.from, req.query.to]),
         executeQuery(dischargeCardCountQuery, [req.query.from, req.query.to]),
         executeQuery(MissedCallCountQuery, [req.query.from, req.query.to]),
+        executeQuery(AttendedMissedCallCountQuery, [
+          req.query.from,
+          req.query.to,
+        ]),
         executeQuery(AnsweredCallCountQuery, [req.query.from, req.query.to]),
         executeQuery(HelplineMissedCallCountQuery, [
-          new Date(req.query.from).getTime(),
+          startOfDay,
+          endOfDay,
+          ...excludedNumbers,
+        ]),
+        executeQuery(HelplineAttendedMissedCallCountQuery, [
+          startOfDay,
+          endOfDay,
+          ...excludedNumbers,
+          startOfDay,
+          endOfDay,
         ]),
         executeQuery(HelplineAnsweredCallCountQuery, [
-          new Date(req.query.from).getTime(),
+          startOfDay,
+          endOfDay,
+          ...excludedNumbers,
         ]),
         executeQuery(HelplineOutgoingCallCountQuery, [
-          new Date(req.query.from).getTime(),
+          startOfDay,
+          endOfDay,
+          ...excludedNumbers,
         ]),
         executeQuery(totalPatientCountQuery),
       ]);
@@ -200,8 +277,11 @@ AND p.is_deleted != 1;
         ipd_count: ipd_count[0].ipd_count,
         dc_count: dc_count[0].dc_count,
         missed_count: missed_count[0].missed_count,
+        attended_missed_count: attended_missed_count[0].attended_missed_count,
         answered_count: answered_count[0].answered_count,
         helpline_missed_count: helpline_missed_count[0].helpline_missed_count,
+        helpline_attended_missed_count:
+          helpline_attended_missed_count[0].helpline_attended_missed_count,
         helpline_answered_count:
           helpline_answered_count[0].helpline_answered_count,
         helpline_outgoing_count:
@@ -269,9 +349,6 @@ const getDCData = async (req) => {
 async function getOPDReportData(req) {
   const { connection } = getConnectionByLocation(req.query.location);
 
-  // Get the current date in YYYY-MM-DD format
-  const currentDate = new Date().toISOString().split("T")[0];
-
   if (!connection) {
     const err = new Error("Invalid location");
     err.status = 404;
@@ -307,17 +384,17 @@ async function getOPDReportData(req) {
               ap.appointment_time,
               ap.confirm_time,
               ap.FDE_Name,
+              ap.executivechk,
+               ap.is_deleted,
               p.name AS patient_name,
               p.sex AS gender,
               d.name AS doctor_name
             FROM appointment ap
-            JOIN patient p ON ap.patient_id = p.patient_id
-            JOIN doctor d ON ap.doctor_id = d.doctor_id
+            LEFT JOIN patient p ON ap.patient_id = p.patient_id
+            LEFT JOIN doctor d ON ap.doctor_id = d.doctor_id
             WHERE ap.appointment_timestamp >= ?  
             AND ap.appointment_timestamp <= ?
-            AND ap.is_deleted != 1
-            AND ap.patient_type = 'New'
-            AND ap.executivechk = 2`;
+            AND ap.patient_type = 'New'`;
           break;
 
         case "postoperative":
@@ -328,17 +405,18 @@ async function getOPDReportData(req) {
               ap.appointment_time,
               ap.confirm_time,
               ap.FDE_Name,
+              ap.executivechk,
+               ap.is_deleted,
               p.name AS patient_name,
               p.sex AS gender,
               d.name AS doctor_name
             FROM appointment ap
-            JOIN patient p ON ap.patient_id = p.patient_id
-            JOIN doctor d ON ap.doctor_id = d.doctor_id
+            LEFT JOIN patient p ON ap.patient_id = p.patient_id
+            LEFT JOIN doctor d ON ap.doctor_id = d.doctor_id
             WHERE ap.appointment_timestamp >= ?  
             AND ap.appointment_timestamp <= ?
-            AND ap.is_deleted != 1
             AND ap.patient_type = 'Postoperative'
-            AND ap.executivechk = 2`;
+            `;
           break;
 
         case "follow":
@@ -349,17 +427,18 @@ async function getOPDReportData(req) {
               ap.appointment_time,
               ap.confirm_time,
               ap.FDE_Name,
+              ap.executivechk,
+               ap.is_deleted,
               p.name AS patient_name,
               p.sex AS gender,
               d.name AS doctor_name
             FROM appointment ap
-            JOIN patient p ON ap.patient_id = p.patient_id
-            JOIN doctor d ON ap.doctor_id = d.doctor_id
+            LEFT JOIN patient p ON ap.patient_id = p.patient_id
+            LEFT JOIN doctor d ON ap.doctor_id = d.doctor_id
             WHERE ap.appointment_timestamp >= ?  
             AND ap.appointment_timestamp <= ?
-            AND ap.is_deleted != 1
             AND ap.patient_type = 'Follow'
-            AND ap.executivechk = 2`;
+            `;
           break;
 
         case "proctoscopy":
@@ -370,18 +449,20 @@ async function getOPDReportData(req) {
         ap.appointment_time,
         ap.confirm_time,
         ap.FDE_Name,
+        ap.executivechk,
+        ap.is_deleted,
         p.name AS patient_name,
         p.sex AS gender,
         d.name AS doctor_name
-        FROM appointment ap
-        JOIN patient p ON ap.patient_id = p.patient_id
+        FROM patient_itemreceipt pir
+        JOIN patient p ON pir.patient_id = p.patient_id
+        JOIN appointment ap ON ap.patient_id = pir.patient_id AND DATE(ap.appointment_timestamp) = pir.item_date
         JOIN doctor d ON ap.doctor_id = d.doctor_id
-        JOIN patient_itemreceipt pir ON ap.patient_id = pir.patient_id
         WHERE pir.item_date >= ?
           AND pir.item_date <= ?
           AND pir.consultation = 'PROCTOSCOPY'
-          AND ap.is_deleted != 1
-          AND ap.executivechk = 2`;
+          AND ap.patient_type = 'New'
+         `;
           break;
 
         default:

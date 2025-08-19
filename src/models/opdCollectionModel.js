@@ -236,4 +236,108 @@ const getMergedData = async (connection, fromDate, toDate) => {
   }
 };
 
-module.exports = { getOPDCollection, getOPDIPDCollection };
+const getOPDCollectionV2 = async (req) => {
+  const { connection } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+
+        const sql = `
+          SELECT ip.patient_id, p.name, ip.item_date, ip.consultation, ip.payment_mode, ip.total
+          FROM patient_itemreceipt ip
+          JOIN patient p ON ip.patient_id = p.patient_id
+          WHERE ip.is_deleted != 1
+          AND ip.item_date >= ?
+          AND ip.item_date <= ?
+          ORDER BY ip.item_date DESC
+        `;
+
+        const queryParams = [req.query.from, req.query.to];
+
+        tempCon.query(sql, queryParams, (error, rows) => {
+          tempCon.release();
+          if (error) return reject(error);
+
+          const modifiedRows = rows.map((row) => ({
+            ...row,
+            payment_mode:
+              row.payment_mode === "UPI" ? "Online" : row.payment_mode,
+          }));
+
+          resolve(modifiedRows);
+        });
+      });
+    });
+
+    const targetConsultations = [
+      "CONSULTATION",
+      "PROCTOSCOPY",
+      "FOLLOW-UP",
+      "BUGSPEAKS",
+    ];
+
+    const paymentModes = ["Cash", "Card", "Online"];
+    const consultationTotals = {};
+    const consultationPaymentModeTotals = {};
+
+    for (const row of rows) {
+      const consultationType = row.consultation || "UNKNOWN";
+      const paymentMode = row.payment_mode || "UNKNOWN";
+      const amount = Number(row.total);
+
+      const groupKey = targetConsultations.includes(consultationType)
+        ? consultationType
+        : "OTHER";
+
+      // Initialize total
+      if (!consultationTotals[groupKey]) {
+        consultationTotals[groupKey] = 0;
+      }
+      consultationTotals[groupKey] += amount;
+
+      // Initialize paymentMode map
+      if (!consultationPaymentModeTotals[groupKey]) {
+        consultationPaymentModeTotals[groupKey] = {};
+      }
+      if (!consultationPaymentModeTotals[groupKey][paymentMode]) {
+        consultationPaymentModeTotals[groupKey][paymentMode] = 0;
+      }
+      consultationPaymentModeTotals[groupKey][paymentMode] += amount;
+    }
+
+    // Ensure all target types + "OTHER" have Cash, Card, Online set to 0 if missing
+    const allGroups = [...targetConsultations, "OTHER"];
+    for (const type of allGroups) {
+      if (!consultationPaymentModeTotals[type]) {
+        consultationPaymentModeTotals[type] = {};
+      }
+      for (const mode of paymentModes) {
+        if (!consultationPaymentModeTotals[type][mode]) {
+          consultationPaymentModeTotals[type][mode] = 0;
+        }
+      }
+
+      if (!consultationTotals[type]) {
+        consultationTotals[type] = 0;
+      }
+    }
+    console.log("Consultation Totals:", consultationPaymentModeTotals);
+    return {
+      data: rows,
+      consultationTotals,
+      consultationPaymentModeTotals,
+    };
+  } catch (error) {
+    throw error;
+  }
+};
+
+module.exports = { getOPDCollection, getOPDIPDCollection, getOPDCollectionV2 };

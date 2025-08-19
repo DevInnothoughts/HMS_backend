@@ -4,6 +4,7 @@ var router = express.Router();
 const {
   getOPDCollection,
   getOPDIPDCollection,
+  getOPDCollectionV2,
 } = require("../models/opdCollectionModel");
 
 router.get("/", async (req, res, next) => {
@@ -25,6 +26,18 @@ router.get("/getTotal", async (req, res, next) => {
   try {
     const TotalOPDCollection = await getOPDIPDCollection(req);
     res.status(200).send(TotalOPDCollection);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/v2", async (req, res, next) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  try {
+    const OPDCollection = await getOPDCollectionV2(req);
+    res.status(200).send(OPDCollection);
   } catch (err) {
     next(err);
   }

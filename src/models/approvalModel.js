@@ -172,6 +172,8 @@ function getYesterdayDateTimeRange() {
   const start = `${formatted}T00:00:00+05:30`;
   const end = `${formatted}T23:59:59+05:30`;
 
+  console.log("Start:", start, "End:", end);
+
   return { start, end };
 }
 const getYesterdayInIST = () => {
@@ -223,7 +225,7 @@ async function getLeads(location) {
     "DP Road": ["DP Road", "Tilak Road", "Dhole Patil Road"],
     "Salunke Vihar": ["Salunke Vihar", "Wanowrie"],
     Hinjewadi: ["Hinjewadi", "Hinjawadi"],
-    "JP Nagar": ["JP Nagar", "Bengaluru"],
+    //"JP Nagar": ["JP Nagar", "Bengaluru"],
     Sarjapura: ["Sarjapura", "Sarjapur"],
     "Rajaji Nagar": ["Rajaji Nagar", "Rajajinagar"],
     Belgavi: ["Belgavi", "Belagavi"],
@@ -234,8 +236,14 @@ async function getLeads(location) {
   };
 
   const areas = baseConditions[location] || [location];
-  const whereArea = areas.map(() => `selected_area LIKE ?`).join(" OR ");
-  const areaParams = areas.map((a) => `%${a}%`);
+  let whereArea = areas.map(() => `selected_area LIKE ?`).join(" OR ");
+  let areaParams = areas.map((a) => `%${a}%`);
+
+  // Special override for JP Nagar
+  if (location === "JP Nagar") {
+    whereArea = `(selected_area LIKE ? OR selected_area = 'Bengaluru')`;
+    areaParams = [`%JP Nagar%`];
+  }
 
   const datetimeCondition = `date BETWEEN ? AND ?`;
 
@@ -324,8 +332,16 @@ async function getBotLeads(location) {
     Sarjapura: ["Sarjapura", "Sarjapur"],
     "Rajaji Nagar": ["Rajaji Nagar", "Rajajinagar"],
     Belgavi: ["Belgavi", "Belagavi"],
-    "Gurgaon Sector 14": ["Gurgaon Sector 14", "Gurugram - Sector 14"],
-    "Gurgaon Sector 49": ["Gurgaon Sector 49", "Gurugram - Sector 49"],
+    "Gurgaon Sector 14": [
+      "Gurgaon Sector 14",
+      "Gurugram - Sector 14",
+      "Gurgaon Sector - 14",
+    ],
+    "Gurgaon Sector 49": [
+      "Gurgaon Sector 49",
+      "Gurugram - Sector 49",
+      "Gurgaon Sector - 49",
+    ],
     Hyderabad: ["Hyderabad", "Jubilee Hills"],
     Chinchwad: ["Chinchwad", "Pimpri-Chinchwad"],
   };
@@ -437,8 +453,6 @@ async function addApprovalDetails(data) {
     throw err;
   }
 
-  const nowUTC = new Date();
-
   const formattedDate = getYesterdayInIST();
 
   return new Promise((resolve, reject) => {
@@ -453,56 +467,50 @@ async function addApprovalDetails(data) {
         }
 
         if (data.subRole === "Owner") {
-          // Only insert if record doesn't exist
           if (rows.length === 0) {
+            // Insert new if not exists
             const insertQuery = `INSERT INTO approval (date, user1, user2) VALUES (?, ?, NULL)`;
-            tempCon.query(
-              insertQuery,
-              [formattedDate, data.user],
-              (err2, result) => {
-                tempCon.release();
-                if (err2) return reject(err2);
-                resolve({ message: "Owner approval successful." });
-              }
-            );
+            tempCon.query(insertQuery, [formattedDate, data.user], (err2) => {
+              tempCon.release();
+              if (err2) return reject(err2);
+              resolve({ message: "Owner approval inserted successfully." });
+            });
           } else {
-            tempCon.release();
-            resolve({ message: "Owner approval skipped (already exists)." });
+            // Update if exists
+            const updateQuery = `UPDATE approval SET user1 = ? WHERE date = ?`;
+            tempCon.query(updateQuery, [data.user, formattedDate], (err3) => {
+              tempCon.release();
+              if (err3) return reject(err3);
+              resolve({ message: "Owner approval updated successfully." });
+            });
           }
         } else if (data.subRole === "Cluster Head") {
-          // Only update if record exists
           if (rows.length > 0) {
+            // Update if exists
             const updateQuery = `UPDATE approval SET user2 = ? WHERE date = ?`;
-            tempCon.query(
-              updateQuery,
-              [data.user, formattedDate],
-              (err3, result) => {
-                tempCon.release();
-                if (err3) return reject(err3);
-                resolve({ message: "Cluster head approval successful." });
-              }
-            );
+            tempCon.query(updateQuery, [data.user, formattedDate], (err3) => {
+              tempCon.release();
+              if (err3) return reject(err3);
+              resolve({
+                message: "Cluster head approval updated successfully.",
+              });
+            });
           } else {
-            // tempCon.release();
-            // resolve({
-            //   message: "No existing record found to update for Cluster Head.",
-            // });
+            // Insert if not exists
             const insertQuery = `INSERT INTO approval (date, user1, user2) VALUES (?, NULL, ?)`;
-            tempCon.query(
-              insertQuery,
-              [formattedDate, data.user],
-              (err2, result) => {
-                tempCon.release();
-                if (err2) return reject(err2);
-                resolve({ message: "Cluster head approval successful." });
-              }
-            );
+            tempCon.query(insertQuery, [formattedDate, data.user], (err2) => {
+              tempCon.release();
+              if (err2) return reject(err2);
+              resolve({
+                message: "Cluster head approval inserted successfully.",
+              });
+            });
           }
         } else {
           tempCon.release();
           reject(
             new Error(
-              "Invalid subRole provided. Expected 'OWNER' or 'Cluster Head'."
+              "Invalid subRole provided. Expected 'Owner' or 'Cluster Head'."
             )
           );
         }
@@ -562,9 +570,12 @@ const getIPDReportData = async (req) => {
         if (err) return reject(err);
 
         const collectionQuery = `
-          SELECT ip.patient_id, p.name, ip.receipt_date, ip.cashamt, ip.cardamt, ip.chequeamt, ip.onlineamt, ip.discountamt
+          SELECT ip.patient_id, p.name, ip.receipt_date, ip.cashamt, ip.cardamt, ip.chequeamt, ip.onlineamt, ip.discountamt, ip.tdsamt, i.totalamt,
+            i.totaldue,
+            i.status
           FROM ipd_payment ip
           JOIN patient p ON ip.patient_id = p.patient_id
+          JOIN invoice i ON ip.invoice_id = i.invoice_id
           WHERE ip.receipt_date >= ? AND ip.receipt_date <= ?
           ORDER BY ip.receipt_date DESC
         `;
@@ -609,9 +620,50 @@ const getIPDReportData = async (req) => {
   }
 };
 
+async function getApprovalStatusSummary(req) {
+  const { location, from, to } = req.query;
+
+  console.log("Location:", location);
+  console.log("Date Range:", from, "to", to);
+
+  const { connection } = getConnectionByLocation(location);
+  if (!connection) {
+    const err = new Error(
+      `Invalid location for approval retrieval: ${location}`
+    );
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+
+        const sql = `
+          SELECT * FROM approval
+          WHERE date BETWEEN ? AND ?
+        `;
+
+        tempCon.query(sql, [from, to], (error, rows) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(rows);
+        });
+      });
+    });
+
+    console.log("Approval records:", rows);
+    return rows;
+  } catch (error) {
+    throw new Error("Error while fetching approval details: " + error.message);
+  }
+}
+
 module.exports = {
   getCallAndWebData,
   addApprovalDetails,
   getApprovalDetails,
   getIPDReportData,
+  getApprovalStatusSummary,
 };
