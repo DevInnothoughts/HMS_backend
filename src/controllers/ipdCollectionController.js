@@ -10,6 +10,8 @@ const {
   getStatuswiseIPDDueList,
   getIPDTotalSummary,
   getIPDCollectionV2,
+  getIPDCollectionV3,
+  getIPDBillsV3,
 } = require("../models/ipdCollectionModel");
 
 router.get("/", async (req, res, next) => {
@@ -30,6 +32,19 @@ router.get("/v2", async (req, res, next) => {
   console.log(req.query.to);
   try {
     const IPDCollection = await getIPDCollectionV2(req);
+    res.status(200).send(IPDCollection);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/v3", async (req, res, next) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  try {
+    const IPDCollection = await getIPDCollectionV3(req);
+    //console.log(IPDCollection.ipdPaymentsCashless);
     res.status(200).send(IPDCollection);
   } catch (err) {
     next(err);
@@ -88,6 +103,18 @@ router.get("/billsV2", async (req, res, next) => {
   console.log(req.query.to);
   try {
     const IPDBills = await getIPDBillsV2(req);
+    res.status(200).send(IPDBills);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/billsV3", async (req, res, next) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  try {
+    const IPDBills = await getIPDBillsV3(req);
     res.status(200).send(IPDBills);
   } catch (err) {
     next(err);

@@ -705,7 +705,7 @@ async function getDatewiseLeads(location, fromDate, toDate) {
             ipdCount: ipdCount,
             leads: allLeads,
           };
-          console.log(`📊 Datewise Leads Stats for ${location}:`, stats);
+          //console.log(`📊 Datewise Leads Stats for ${location}:`, stats);
           resolve(stats);
         });
       } catch (err) {
@@ -896,7 +896,7 @@ async function getDatewiseBotLeads(location, fromDate, toDate) {
           ipdCount: ipdCount,
           leads: allLeads,
         };
-        console.log(`📊 Datewise Bot Leads Stats for ${location}:`, stats);
+        //console.log(`📊 Datewise Bot Leads Stats for ${location}:`, stats);
         resolve(stats);
       });
     });

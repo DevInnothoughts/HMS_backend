@@ -16,6 +16,7 @@ const ConvincingScoreController = require("./src/controllers/convincingScoreCont
 const CallingListController = require("./src/controllers/callingListController");
 const leadManagementController = require("./src/controllers/leadManagementController");
 const approvalController = require("./src/controllers/approvalController");
+const performanceController = require("./src/controllers/performanceController");
 const {
   syncAppointments,
   syncBotAppointments,
@@ -79,6 +80,7 @@ app.use("/hms/ConvincingScore", ConvincingScoreController);
 app.use("/hms/callingList", CallingListController);
 app.use("/hms/leadManagement", leadManagementController);
 app.use("/hms/approval", approvalController);
+app.use("/hms/performance", performanceController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -96,36 +98,35 @@ app.use((err, req, res, next) => {
 // });
 
 // schedule: 30 20 * * * -> 8:30 PM every day. timezone Asia/Kolkata
-// cron.schedule(
-//   "30 20 * * *",
-//   async () => {
-//     await Promise.all(
-//       locations.map(async (loc) => {
-//         const appointments = await getTomorrowsAppointment(loc);
+cron.schedule(
+  "30 20 * * *",
+  async () => {
+    await Promise.all(
+      locations.map(async (loc) => {
+        const appointments = await getTomorrowsAppointment(loc);
 
-//         console.log(
-//           `Location ${loc} has ${appointments.length} appointments for tommorrow.`
-//         );
+        console.log(
+          `Location ${loc} has ${appointments.length} appointments for tomorrow.`
+        );
 
-//         for (const appt of appointments) {
-//           await sendScheduledWhatsAppMsg(
-//             appt.patient_phone,
-//             appt.doctor_name,
-//             new Date(appt.appointment_timestamp).toLocaleDateString("en-CA", {
-//               timeZone: "Asia/Kolkata",
-//             }),
-//             appt.appointment_time,
-//             loc, // Use the correct location here
-//             appt.FDE_Name
-//           );
-//         }
-//       })
-//     );
-//   },
-//   {
-//     timezone: "Asia/Kolkata",
-//   }
-// );
+        for (const appt of appointments) {
+          await sendScheduledWhatsAppMsg(
+            `91${appt.patient_phone}`,
+            new Date(appt.appointment_timestamp).toLocaleDateString("en-CA", {
+              timeZone: "Asia/Kolkata",
+            }),
+            appt.appointment_time,
+            loc, // Use the correct location here
+            appt.FDE_Name
+          );
+        }
+      })
+    );
+  },
+  {
+    timezone: "Asia/Kolkata",
+  }
+);
 
 // Start the server
 const PORT = process.env.PORT || 5100;

@@ -387,7 +387,6 @@ async function getTomorrowsAppointment(loc) {
 
 const sendScheduledWhatsAppMsg = async (
   patientPhone,
-  doctorName,
   appoDate,
   appoTime,
   branchLocation,
@@ -607,10 +606,9 @@ const sendScheduledWhatsAppMsg = async (
   // Prepare data to send in the API request
   const data = {
     broadcast_name: "appointment_msg",
-    template_name: "appointment_msg_1",
+    template_name: "appt_confirmation_final2",
     parameters: [
       { name: "address", value: branchaddress },
-      { name: "doctor_name", value: doctorName },
       { name: "appointment_date", value: appoDate },
       { name: "appointment_time", value: timeRange },
       { name: "helpline", value: helpline },
