@@ -340,4 +340,195 @@ const getOPDCollectionV2 = async (req) => {
   }
 };
 
-module.exports = { getOPDCollection, getOPDIPDCollection, getOPDCollectionV2 };
+const getOPDCollectionV3 = async (req) => {
+  const { connection, location } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  const { from, to } = req.query;
+
+  const normalizeMode = (m) => {
+    if (!m) return "UNKNOWN";
+    const s = String(m).trim();
+    if (/^upi$/i.test(s) || /^paytm$/i.test(s)) return "Online";
+    if (/^card$/i.test(s)) return "Card";
+    if (/^cash$/i.test(s)) return "Cash";
+    return s;
+  };
+
+  const runWithPool = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+        tempCon.query(sql, params, (error, rows) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(rows);
+        });
+      });
+    });
+
+  const computeAggregates = (rows, targetConsultations) => {
+    const paymentModes = ["Cash", "Card", "Online"];
+    const consultationTotals = {};
+    const consultationPaymentModeTotals = {};
+
+    for (const row of rows) {
+      const rawConsult = row.consultation || "UNKNOWN";
+      const paymentMode = normalizeMode(row.payment_mode);
+      const amount = Number(row.total) || 0;
+
+      const groupKey = targetConsultations.includes(rawConsult)
+        ? rawConsult
+        : "OTHER";
+
+      consultationTotals[groupKey] =
+        (consultationTotals[groupKey] || 0) + amount;
+
+      if (!consultationPaymentModeTotals[groupKey]) {
+        consultationPaymentModeTotals[groupKey] = {};
+      }
+      consultationPaymentModeTotals[groupKey][paymentMode] =
+        (consultationPaymentModeTotals[groupKey][paymentMode] || 0) + amount;
+    }
+
+    const allGroups = [...targetConsultations, "OTHER"];
+    for (const g of allGroups) {
+      if (!consultationTotals[g]) consultationTotals[g] = 0;
+      if (!consultationPaymentModeTotals[g])
+        consultationPaymentModeTotals[g] = {};
+      for (const pm of paymentModes) {
+        if (!consultationPaymentModeTotals[g][pm]) {
+          consultationPaymentModeTotals[g][pm] = 0;
+        }
+      }
+    }
+
+    return { consultationTotals, consultationPaymentModeTotals };
+  };
+
+  try {
+    // ---------------- LAB rows ----------------
+    let labRowsSql;
+    if (location === "DP Road") {
+      labRowsSql = `
+        SELECT pr.receipt_id, pr.patient_id, p.name,
+               pr.receipt_date AS item_date,
+               'LAB' AS consultation,
+               pr.paymentmode AS payment_mode,
+               pr.totalamt AS total
+        FROM patient_receipt pr
+        JOIN patient p ON pr.patient_id = p.patient_id
+        WHERE pr.chargeCondition = 'LabTest'
+          AND pr.receipt_date >= ?
+          AND pr.receipt_date <= ?
+          AND pr.is_deleted != 1
+        ORDER BY pr.receipt_date DESC
+      `;
+    } else {
+      labRowsSql = `
+        SELECT ip.receipt_id, ip.patient_id, p.name,
+               ip.item_date,
+               'LAB' AS consultation,
+               ip.payment_mode, ip.total
+        FROM patient_itemreceipt ip
+        JOIN patient p ON ip.patient_id = p.patient_id
+        WHERE ip.consultation = 'LAB'
+          AND ip.item_date >= ?
+          AND ip.item_date <= ?
+          AND ip.is_deleted != 1
+        ORDER BY ip.item_date DESC
+      `;
+    }
+
+    const labRawRows = await runWithPool(labRowsSql, [from, to]);
+    const labRows = labRawRows.map((r) => ({
+      ...r,
+      payment_mode: normalizeMode(r.payment_mode),
+    }));
+    const labForAggregate = labRows.map((r) => ({ ...r, consultation: "LAB" }));
+
+    const {
+      consultationTotals: labConsultationTotals,
+      consultationPaymentModeTotals: labConsultationPaymentModeTotals,
+    } = computeAggregates(labForAggregate, ["LAB"]);
+
+    // ---------------- OPD rows ----------------
+    let opdSql, opdParams;
+    if (location === "DP Road") {
+      // fetch OPD rows, exclude LAB by receipt_id
+      const labIds = labRows.map((r) => r.receipt_id); // collected above
+      opdSql = `
+        SELECT ip.receipt_id, ip.patient_id, p.name, ip.item_date,
+               ip.consultation, ip.payment_mode, ip.total
+        FROM patient_itemreceipt ip
+        JOIN patient p ON ip.patient_id = p.patient_id
+        WHERE ip.is_deleted != 1
+          AND ip.item_date >= ?
+          AND ip.item_date <= ?
+      `;
+      opdParams = [from, to];
+      if (labIds.length > 0) {
+        opdSql += ` AND ip.receipt_id NOT IN (?) `;
+        opdParams.push(labIds);
+      }
+    } else {
+      // other locations → just exclude LAB by consultation
+      opdSql = `
+        SELECT ip.receipt_id, ip.patient_id, p.name, ip.item_date,
+               ip.consultation, ip.payment_mode, ip.total
+        FROM patient_itemreceipt ip
+        JOIN patient p ON ip.patient_id = p.patient_id
+        WHERE ip.is_deleted != 1
+          AND ip.item_date >= ?
+          AND ip.item_date <= ?
+          AND ip.consultation != 'LAB'
+        ORDER BY ip.item_date DESC
+      `;
+      opdParams = [from, to];
+    }
+
+    const opdRawRows = await runWithPool(opdSql, opdParams);
+    const opdRows = opdRawRows.map((r) => ({
+      ...r,
+      payment_mode: normalizeMode(r.payment_mode),
+    }));
+
+    const opdTargetConsultations = [
+      "CONSULTATION",
+      "PROCTOSCOPY",
+      "FOLLOW-UP",
+      "BUGSPEAKS",
+    ];
+    const {
+      consultationTotals: opdConsultationTotals,
+      consultationPaymentModeTotals: opdConsultationPaymentModeTotals,
+    } = computeAggregates(opdRows, opdTargetConsultations);
+
+    // ---------------- FINAL RESPONSE ----------------
+    return {
+      data: [...opdRows, ...labRows],
+      consultationTotals: {
+        ...opdConsultationTotals,
+        LAB: labConsultationTotals.LAB,
+      },
+      consultationPaymentModeTotals: {
+        ...opdConsultationPaymentModeTotals,
+        LAB: labConsultationPaymentModeTotals.LAB,
+      },
+    };
+  } catch (error) {
+    throw error;
+  }
+};
+
+module.exports = {
+  getOPDCollection,
+  getOPDIPDCollection,
+  getOPDCollectionV2,
+  getOPDCollectionV3,
+};

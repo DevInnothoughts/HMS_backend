@@ -165,6 +165,7 @@ const getIPDCollectionV3 = async (req) => {
             SELECT 
               ip.patient_id,
               ip.invoice_id,
+              i.creation_date AS invoice_date,
               ip.receipt_date,
               ip.cashamt,
               ip.cardamt,
@@ -207,6 +208,7 @@ const getIPDCollectionV3 = async (req) => {
               p.name,
               i.totalamt,
               i.totaldue,
+              i.creation_date AS invoice_date,
               i.status
             FROM insurance_invoice iv 
             LEFT JOIN patient p ON iv.patientid = p.patient_id
@@ -314,6 +316,7 @@ const getIPDCollectionV3 = async (req) => {
       }
     });
 
+    //console.log("Total combined payments:", combinedPayments);
     return {
       ipdPayments: combinedPayments,
       invoices: invoiceData,

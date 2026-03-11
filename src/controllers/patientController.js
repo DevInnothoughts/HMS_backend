@@ -5,6 +5,7 @@ const {
   getDiagnosis,
   getReference,
   getReferenceV2,
+  getPatientsDiagnosis,
 } = require("../models/patientModel");
 
 router.get("/", async (req, res, next) => {
@@ -19,6 +20,15 @@ router.get("/", async (req, res, next) => {
 router.get("/diagnosis", async (req, res, next) => {
   try {
     const result = await getDiagnosis(req);
+    res.status(200).send(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/diagnosis/patient", async (req, res, next) => {
+  try {
+    const result = await getPatientsDiagnosis(req);
     res.status(200).send(result);
   } catch (err) {
     next(err);

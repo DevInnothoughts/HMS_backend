@@ -113,6 +113,59 @@ const getDiagnosis = async (req) => {
   }
 };
 
+const getPatientsDiagnosis = async (req) => {
+  const { connection, location } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) {
+          return reject(err);
+        }
+
+        const sql = `
+          SELECT 
+            di.date_diagnosis,
+            di.diagnosis,
+            di.diagnosisAdvice,
+            di.advice,
+            consultantDoctor.name AS consultantDoctor,
+            assistantDoctor.name AS assistantDoctor,
+            p.*
+          FROM diagnosis di
+          LEFT JOIN doctor consultantDoctor ON di.consultantDoctor = consultantDoctor.doctor_id
+          LEFT JOIN doctor assistantDoctor ON di.assistanceDoctor = assistantDoctor.doctor_id
+          LEFT JOIN patient p ON di.patient_id = p.patient_id
+          WHERE di.patient_id = ?
+          ORDER BY di.diag_id ASC
+        `;
+
+        const queryParams = [req.query.patientId]; // Parameters for the SQL query
+
+        tempCon.query(sql, queryParams, (error, rows) => {
+          tempCon.release();
+          if (error) {
+            return reject(error);
+          }
+          resolve(rows);
+        });
+      });
+    });
+
+    console.log(rows);
+    return rows;
+  } catch (error) {
+    console.error("Error fetching diagnosis data:", error);
+    throw error;
+  }
+};
+
 async function getReference(req) {
   const { connection, location } = getConnectionByLocation(req.query.location);
   console.log(
@@ -242,6 +295,7 @@ async function getReferenceV2(req) {
       FROM patient
       WHERE date >= ?  
       AND date <= ?
+      AND Uid_no IS NOT NULL
       AND ConfirmPatient = 1
       AND is_deleted = 0
       GROUP BY reference_type;
@@ -643,4 +697,5 @@ module.exports = {
   getReferenceV2,
   getTomorrowsAppointment,
   sendScheduledWhatsAppMsg,
+  getPatientsDiagnosis,
 };

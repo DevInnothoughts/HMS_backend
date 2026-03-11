@@ -35,6 +35,7 @@ async function getDailyOPDCollection(req) {
           AND is_deleted != 1
           AND executivechk = 2
       `;
+
       const followPatientCountQuery = `
         SELECT COUNT(patient_type) AS followpatient
         FROM appointment
@@ -61,17 +62,38 @@ async function getDailyOPDCollection(req) {
           AND is_deleted != 1
       `;
 
+      const diagnosisCountQuery = `
+        SELECT COUNT(*) AS diagnosis
+        FROM diagnosis
+        WHERE date_diagnosis = ?
+      `;
+
+      const prescriptionCountQuery = `
+       SELECT 
+        COUNT(DISTINCT patient_id) AS prescription
+      FROM prescription
+      WHERE creation_timestamp = ?
+        AND prescription_type != 'surgery_type'
+        AND is_deleted != 1;
+      `;
+
       const [
         newPatientCount,
         followPatientCount,
         poPatientCount,
         proctoscopyCount,
+        diagnosisCount,
+        prescriptionCount,
       ] = await Promise.all([
         executeQuery(newPatientCountQuery, [currentDate]),
         executeQuery(followPatientCountQuery, [currentDate]),
         executeQuery(poPatientCountQuery, [currentDate]),
         executeQuery(proctoscopyCountQuery, [currentDate]),
+        executeQuery(diagnosisCountQuery, [currentDate]),
+        executeQuery(prescriptionCountQuery, [currentDate]),
       ]);
+
+      console.log("Prescription Count:", prescriptionCountQuery);
 
       const firstTableSum =
         newPatientCount[0].newpatient +
@@ -80,7 +102,7 @@ async function getDailyOPDCollection(req) {
 
       // Counts for DNC
       const newDNCQuery = `
-        SELECT COUNT(appointment.patient_type) AS newDNCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS newDNCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE appointment.appointment_timestamp = ?
@@ -92,7 +114,7 @@ async function getDailyOPDCollection(req) {
           AND appointment.executivechk = 2
       `;
       const followDNCQuery = `
-        SELECT COUNT(appointment.patient_type) AS FollowDNCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS FollowDNCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE appointment.appointment_timestamp = ?
@@ -103,7 +125,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.is_deleted != 1
       `;
       const poDNCQuery = `
-        SELECT COUNT(appointment.patient_type) AS PODNCCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS PODNCCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE appointment.appointment_timestamp = ?
@@ -127,7 +149,7 @@ async function getDailyOPDCollection(req) {
 
       // Counts for DNP
       const newDNPQuery = `
-        SELECT COUNT(appointment.patient_type) AS newDNPCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS newDNPCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE appointment.appointment_timestamp = ?
@@ -138,7 +160,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.is_deleted != 1
       `;
       const followDNPQuery = `
-        SELECT COUNT(appointment.patient_type) AS FollowDNPCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS FollowDNPCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE appointment.appointment_timestamp = ?
@@ -149,7 +171,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.is_deleted != 1
       `;
       const poDNPQuery = `
-        SELECT COUNT(appointment.patient_type) AS PODNPCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS PODNPCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE patient_receipt.receipt_date = ?
@@ -172,7 +194,7 @@ async function getDailyOPDCollection(req) {
 
       // Counts for DNW
       const newDNWQuery = `
-        SELECT COUNT(appointment.patient_type) AS newDNWCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS newDNWCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE patient_receipt.receipt_date = ?
@@ -182,7 +204,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.is_deleted != 1
       `;
       const followDNWQuery = `
-        SELECT COUNT(appointment.patient_type) AS FollowDNWCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS FollowDNWCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE patient_receipt.receipt_date = ?
@@ -192,7 +214,7 @@ async function getDailyOPDCollection(req) {
           AND patient_receipt.is_deleted != 1
       `;
       const poDNWQuery = `
-        SELECT COUNT(appointment.patient_type) AS PODNWCount
+        SELECT COUNT(DISTINCT appointment.patient_id) AS PODNWCount
         FROM appointment
         JOIN patient_receipt ON patient_receipt.patient_id = appointment.patient_id
         WHERE patient_receipt.receipt_date = ?
@@ -398,6 +420,71 @@ async function getDailyOPDCollection(req) {
         (labCardTotal[0].Total || 0) +
         (labOnlineTotal[0].Total || 0);
 
+      let pharmacyCashTotalQuery,
+        pharmacyCardTotalQuery,
+        pharmacyOnlineTotalQuery;
+
+      if (location === "DP Road") {
+        pharmacyCashTotalQuery = `
+            SELECT SUM(totalamt) AS Total
+            FROM patient_receipt
+            WHERE receipt_date = ?
+              AND paymentmode = 'Cash'
+              AND chargeCondition = 'LabTest'
+              AND is_deleted != 1
+          `;
+        pharmacyCardTotalQuery = `
+            SELECT SUM(totalamt) AS Total
+            FROM patient_receipt
+            WHERE receipt_date = ?
+              AND paymentmode = 'Card'
+              AND chargeCondition = 'LabTest'
+              AND is_deleted != 1
+          `;
+        pharmacyOnlineTotalQuery = `
+            SELECT SUM(totalamt) AS Total
+            FROM patient_receipt
+            WHERE receipt_date = ?
+              AND paymentmode IN ('Online', 'UPI')
+              AND chargeCondition = 'LabTest'
+              AND is_deleted != 1
+          `;
+      } else {
+        pharmacyCashTotalQuery = `
+            SELECT SUM(final_total) AS Total
+            FROM pharmacybill
+            WHERE created_at = ?
+              AND paymentmode = 'Cash'
+              AND is_deleted != 1
+          `;
+        pharmacyCardTotalQuery = `
+            SELECT SUM(final_total) AS Total
+            FROM pharmacybill
+            WHERE created_at = ?
+              AND paymentmode = 'Card'
+              AND is_deleted != 1
+          `;
+        pharmacyOnlineTotalQuery = `
+            SELECT SUM(final_total) AS Total
+            FROM pharmacybill
+            WHERE created_at = ?
+              AND paymentmode IN ('Online', 'UPI', 'Paytm')
+              AND is_deleted != 1
+          `;
+      }
+
+      const [pharmacyCashTotal, pharmacyCardTotal, pharmacyOnlineTotal] =
+        await Promise.all([
+          executeQuery(pharmacyCashTotalQuery, [currentDate]),
+          executeQuery(pharmacyCardTotalQuery, [currentDate]),
+          executeQuery(pharmacyOnlineTotalQuery, [currentDate]),
+        ]);
+
+      const pharmacyCashtablesum =
+        (pharmacyCashTotal[0].Total || 0) +
+        (pharmacyCardTotal[0].Total || 0) +
+        (pharmacyOnlineTotal[0].Total || 0);
+
       const queries = [
         "SELECT SUM(total) AS MCDPA FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'MCDPA'",
         "SELECT SUM(total) AS CH FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'COLON HYDROTHERAPY'",
@@ -416,8 +503,13 @@ async function getDailyOPDCollection(req) {
         "SELECT SUM(total) AS ECG FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'ECG'",
         "SELECT SUM(total) AS NUTRITIONIST FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'NUTRITIONIST'",
         "SELECT SUM(total) AS `BLOODTEST&ECG` FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND REPLACE(LOWER(consultation), ' ', '') = 'bloodtests+ecg'",
+        "SELECT SUM(total) AS `BLOODTESTS` FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND REPLACE(LOWER(consultation), ' ', '') = 'bloodtests'",
         "SELECT SUM(total) AS DRESSING FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'DRESSING'",
         "SELECT SUM(total) AS FITNESS FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'FITNESS'",
+        "SELECT SUM(total) AS Histopathology FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND consultation = 'Histopathology'",
+        "SELECT SUM(total) AS `BUGSPEAKS` FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND REPLACE(LOWER(consultation), ' ', '') = 'bugspeaks'",
+        "SELECT SUM(total) AS `SITZBATH` FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND REPLACE(LOWER(consultation), ' ', '') = 'sitzbath'",
+        "SELECT SUM(total) AS `UROFLOWMETRY` FROM patient_itemreceipt WHERE is_deleted != '1' AND item_date = ? AND REPLACE(LOWER(consultation), ' ', '') = 'uroflowmetry'",
       ];
 
       const results = await Promise.all(
@@ -443,8 +535,13 @@ async function getDailyOPDCollection(req) {
           "ECG",
           "NUTRITIONIST",
           "BLOODTEST&ECG",
+          "BLOODTESTS",
           "DRESSING",
           "FITNESS",
+          "Histopathology",
+          "BUGSPEAKS",
+          "SITZBATH",
+          "UROFLOWMETRY",
         ][index];
         consultationTotals[key] = result[0] ? result[0] : 0;
       });
@@ -547,6 +644,10 @@ async function getDailyOPDCollection(req) {
             "BLOODTEST & ECG",
             consultationTotals["BLOODTEST&ECG"]["BLOODTEST&ECG"],
           ],
+          consultationTotals["BLOODTESTS"]["BLOODTESTS"] && [
+            "BLOODTESTS",
+            consultationTotals["BLOODTESTS"]["BLOODTESTS"],
+          ],
           consultationTotals.DRESSING.DRESSING && [
             "DRESSING",
             consultationTotals.DRESSING.DRESSING,
@@ -554,6 +655,22 @@ async function getDailyOPDCollection(req) {
           consultationTotals.FITNESS.FITNESS && [
             "FITNESS",
             consultationTotals.FITNESS.FITNESS,
+          ],
+          consultationTotals.Histopathology.Histopathology && [
+            "Histopathology",
+            consultationTotals.Histopathology.Histopathology,
+          ],
+          consultationTotals.BUGSPEAKS.BUGSPEAKS && [
+            "BUGSPEAKS",
+            consultationTotals.BUGSPEAKS.BUGSPEAKS,
+          ],
+          consultationTotals.SITZBATH.SITZBATH && [
+            "SITZBATH",
+            consultationTotals.SITZBATH.SITZBATH,
+          ],
+          consultationTotals.UROFLOWMETRY.UROFLOWMETRY && [
+            "UROFLOWMETRY",
+            consultationTotals.UROFLOWMETRY.UROFLOWMETRY,
           ],
         ].filter(Boolean), // This filters out any `false` values, including `undefined`
         overallCollection: [
@@ -568,6 +685,14 @@ async function getDailyOPDCollection(req) {
           ["Online", labOnlineTotal[0].Total || 0],
           ["Total", labCashtablesum],
         ],
+        pharmacyCollection: [
+          ["Cash", pharmacyCashTotal[0].Total || 0],
+          ["Card", pharmacyCardTotal[0].Total || 0],
+          ["Online", pharmacyOnlineTotal[0].Total || 0],
+          ["Total", pharmacyCashtablesum],
+        ],
+        diagnosisCount: diagnosisCount[0].diagnosis || 0,
+        prescriptionCount: prescriptionCount[0].prescription || 0,
       };
     } catch (error) {
       console.error("Error executing queries:", error);

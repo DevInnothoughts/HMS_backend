@@ -23,7 +23,6 @@ const getIVRCall = async (req) => {
           FROM IVRdata
           WHERE STR_TO_DATE(call_date, '%Y-%d-%m') >= ?
           AND destination_no != ''
-          
         `;
 
         if (status && status !== null) {

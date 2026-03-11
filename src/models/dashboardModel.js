@@ -56,6 +56,33 @@ async function getDashboardValues(req) {
         AND p.is_deleted !=1
       `;
 
+      const npsAverageQuery = `SELECT
+          ROUND(
+              AVG(
+                  CAST(
+                      JSON_UNQUOTE(JSON_EXTRACT(ratingInfo, '$.averageRating'))
+                      AS DECIMAL(5,2)
+                  )
+              ),
+              2
+          ) AS branch_average_rating,
+          COUNT(*) AS rated_patient_count
+      FROM invoice
+      WHERE ratingInfo IS NOT NULL
+        AND JSON_EXTRACT(ratingInfo, '$.averageRating') IS NOT NULL
+        AND creation_date BETWEEN
+            CASE
+                WHEN MONTH(CURDATE()) >= 4
+                THEN CONCAT(YEAR(CURDATE()), '-04-01')
+                ELSE CONCAT(YEAR(CURDATE()) - 1, '-04-01')
+            END
+            AND
+            CASE
+                WHEN MONTH(CURDATE()) >= 4
+                THEN CONCAT(YEAR(CURDATE()) + 1, '-03-31')
+                ELSE CONCAT(YEAR(CURDATE()), '-03-31')
+            END;
+      `;
       const genderWiseCountQuery = `SELECT 
     COUNT(CASE WHEN p.sex = 'Male' THEN 1 END) AS malePatients,
     COUNT(CASE WHEN p.sex = 'Female' THEN 1 END) AS femalePatients
@@ -224,6 +251,7 @@ AND p.is_deleted != 1;
         helpline_answered_count,
         helpline_outgoing_count,
         totalPatientCount,
+        npsAverageCount,
       ] = await Promise.all([
         executeQuery(newPatientCountQuery, [req.query.from, req.query.to]),
         executeQuery(followPatientCountQuery, [req.query.from, req.query.to]),
@@ -261,9 +289,11 @@ AND p.is_deleted != 1;
           ...excludedNumbers,
         ]),
         executeQuery(totalPatientCountQuery),
+        executeQuery(npsAverageQuery),
       ]);
 
       const approvalStatus = await getApprovalDetails(req.query.location);
+      console.log("NPS Average:", npsAverageCount[0].branch_average_rating);
 
       return {
         dailyOPDReport: {
@@ -287,6 +317,7 @@ AND p.is_deleted != 1;
         helpline_outgoing_count:
           helpline_outgoing_count[0].helpline_outgoing_count,
         approvalStatus,
+        nps_avg: npsAverageCount[0].branch_average_rating || 0,
       };
     } catch (error) {
       console.error("Error executing queries:", error);
@@ -386,6 +417,7 @@ async function getOPDReportData(req) {
               ap.FDE_Name,
               ap.executivechk,
                ap.is_deleted,
+              p.patient_id,
               p.name AS patient_name,
               p.sex AS gender,
               d.name AS doctor_name
@@ -667,7 +699,7 @@ async function getDoctorDashboardValues(req) {
   console.log(
     // new Date(req.query.from).getTime(),
     // new Date(req.query.to).getTime(),
-    req.query.mobile
+    req.query.mobile,
   );
 
   if (!connection) {

@@ -2,6 +2,8 @@ var express = require("express");
 var app = express();
 const cors = require("cors");
 const cron = require("node-cron");
+const dotenv = require("dotenv");
+dotenv.config();
 const ipdCollectionController = require("./src/controllers/ipdCollectionController");
 const opdCollectionController = require("./src/controllers/opdCollectionController");
 const appointmentController = require("./src/controllers/appointmentController");
@@ -15,8 +17,13 @@ const HelplineController = require("./src/controllers/helplineCallController");
 const ConvincingScoreController = require("./src/controllers/convincingScoreController");
 const CallingListController = require("./src/controllers/callingListController");
 const leadManagementController = require("./src/controllers/leadManagementController");
+const gpReferralController = require("./src/controllers/gpReferralController");
 const approvalController = require("./src/controllers/approvalController");
 const performanceController = require("./src/controllers/performanceController");
+const openAIController = require("./src/controllers/openAIController");
+const pharmacyController = require("./src/controllers/evitalPharmacyCollectionController");
+const reportController = require("./src/controllers/reportController");
+
 const {
   syncAppointments,
   syncBotAppointments,
@@ -25,6 +32,7 @@ const {
   getTomorrowsAppointment,
   sendScheduledWhatsAppMsg,
 } = require("./src/models/patientModel");
+const { generateAndSendReport } = require("./src/models/reportMailModel");
 
 const locations = [
   "DP Road",
@@ -60,6 +68,10 @@ const locations = [
   "Rajaji Nagar",
   "Sarjapura",
   "Katraj",
+  "Ahmedabad",
+  "Mohali",
+  "Aurangabad",
+  "Whitefield",
 ];
 
 app.use(express.json());
@@ -81,6 +93,10 @@ app.use("/hms/callingList", CallingListController);
 app.use("/hms/leadManagement", leadManagementController);
 app.use("/hms/approval", approvalController);
 app.use("/hms/performance", performanceController);
+app.use("/hms/gpReferral", gpReferralController);
+app.use("/hms/aiAssistant", openAIController);
+app.use("/hms/pharmacyCollection", pharmacyController);
+app.use("/hms/report", reportController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -106,7 +122,7 @@ cron.schedule(
         const appointments = await getTomorrowsAppointment(loc);
 
         console.log(
-          `Location ${loc} has ${appointments.length} appointments for tomorrow.`
+          `Location ${loc} has ${appointments.length} appointments for tomorrow.`,
         );
 
         for (const appt of appointments) {
@@ -117,16 +133,34 @@ cron.schedule(
             }),
             appt.appointment_time,
             loc, // Use the correct location here
-            appt.FDE_Name
+            appt.FDE_Name,
           );
         }
-      })
+      }),
     );
   },
   {
     timezone: "Asia/Kolkata",
-  }
+  },
 );
+
+// Schedule at 12:30 AM every day
+// cron.schedule(
+//   "*/3 * * * *",
+//   //"30 0 * * *",
+//   async () => {
+//     try {
+//       console.log("Generating and sending yesterday's collections report...");
+//       await generateAndSendReport("shubham.khatod17594@gmail.com"); // replace with actual email
+//       console.log("Report sent successfully.");
+//     } catch (err) {
+//       console.error("Error in sending report:", err);
+//     }
+//   },
+//   {
+//     timezone: "Asia/Kolkata", // Ensure correct timezone
+//   }
+// );
 
 // Start the server
 const PORT = process.env.PORT || 5100;
