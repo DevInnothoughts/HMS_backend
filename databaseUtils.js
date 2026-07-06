@@ -41,6 +41,10 @@ const conAhmedabad = createPool("hmsAhmedabadDB");
 const conMohali = createPool("hmsMohaliDB");
 const conAurangabad = createPool("hmsAurangabadDB");
 const conWhitefield = createPool("hmsWhitefieldDB");
+const conHadapsar = createPool("hmsHadapsarDB");
+const conKalyan = createPool("hmsKalyanDB");
+const conBopal = createPool("hmsBopalDB");
+const conElectroniccity = createPool("hmsElectroniccityDB");
 
 const getConnectionByLocation = (loc) => {
   let connection;
@@ -283,6 +287,26 @@ const getConnectionByLocation = (loc) => {
     case "Whitefield":
       connection = conWhitefield;
       location = "Whitefield";
+      break;
+
+    case "Hadapsar":
+      connection = conHadapsar;
+      location = "Hadapsar";
+      break;
+
+    case "Kalyan":
+      connection = conKalyan;
+      location = "Kalyan";
+      break;
+
+    case "Bopal":
+      connection = conBopal;
+      location = "Bopal";
+      break;
+
+    case "Electronic City":
+      connection = conElectroniccity;
+      location = "Electronic City";
       break;
 
     default:

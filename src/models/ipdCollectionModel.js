@@ -162,26 +162,27 @@ const getIPDCollectionV3 = async (req) => {
           if (err) return reject(err);
 
           const ipdQueryAll = `
-            SELECT 
-              ip.patient_id,
-              ip.invoice_id,
-              i.creation_date AS invoice_date,
-              ip.receipt_date,
-              ip.cashamt,
-              ip.cardamt,
-              ip.chequeamt,
-              ip.onlineamt,
-              ip.discountamt,
-              ip.tdsamt,
-              p.name,
-              i.totalamt,
-              i.totaldue,
-              i.status
-            FROM ipd_payment ip
-            LEFT JOIN patient p ON ip.patient_id = p.patient_id
-            LEFT JOIN invoice i ON ip.invoice_id = i.invoice_id
-            WHERE ip.receipt_date BETWEEN ? AND ?
-            ORDER BY ip.receipt_date DESC;
+            SELECT
+    ip.invoice_id,
+    ip.patient_id,
+    MAX(ip.receipt_date) AS receipt_date,
+    SUM(ip.cashamt) AS cashamt,
+    SUM(ip.cardamt) AS cardamt,
+    SUM(ip.chequeamt) AS chequeamt,
+    SUM(ip.onlineamt) AS onlineamt,
+    SUM(ip.discountamt) AS discountamt,
+    SUM(ip.tdsamt) AS tdsamt,
+    p.name,
+    i.totalamt,
+    i.totaldue,
+    i.status,
+    i.creation_date AS invoice_date
+FROM ipd_payment ip
+LEFT JOIN patient p ON ip.patient_id = p.patient_id
+LEFT JOIN invoice i ON ip.invoice_id = i.invoice_id
+WHERE ip.receipt_date BETWEEN ? AND ?
+GROUP BY ip.invoice_id
+ORDER BY MAX(ip.receipt_date) DESC;
           `;
 
           tempCon.query(ipdQueryAll, [from, to], (error, results) => {
@@ -289,30 +290,59 @@ const getIPDCollectionV3 = async (req) => {
                     discountamt: collection.discountamt || 0,
                     tdsamt: collection.tdsamt || 0,
                   });
-                }
+                },
               );
             });
-          })
-      )
+          }),
+      ),
     );
+
+    // // Step 3: Combine normal + cashless (by invoice_id)
+    // const combinedPayments = [...ipdAllPayments];
+
+    // enrichedIpdCashless.forEach((cashlessRow) => {
+    //   const existingIndex = combinedPayments.findIndex(
+    //     (row) => row.invoice_id === cashlessRow.invoice_id,
+    //   );
+
+    //   if (existingIndex > -1) {
+    //     // Merge values if invoice_id exists
+    //     combinedPayments[existingIndex] = {
+    //       ...combinedPayments[existingIndex],
+    //       ...cashlessRow,
+    //     };
+    //   } else {
+    //     // If not found, just push cashless record
+    //     combinedPayments.push(cashlessRow);
+    //   }
+    // });
 
     // Step 3: Combine normal + cashless (by invoice_id)
     const combinedPayments = [...ipdAllPayments];
 
     enrichedIpdCashless.forEach((cashlessRow) => {
-      const existingIndex = combinedPayments.findIndex(
-        (row) => row.invoice_id === cashlessRow.invoice_id
+      const matchingRows = combinedPayments.filter(
+        (row) => row.invoice_id === cashlessRow.invoice_id,
       );
 
-      if (existingIndex > -1) {
-        // Merge values if invoice_id exists
-        combinedPayments[existingIndex] = {
-          ...combinedPayments[existingIndex],
-          ...cashlessRow,
-        };
+      if (matchingRows.length > 0) {
+        // Merge cashless data into ALL matching rows
+        matchingRows.forEach((row) => {
+          Object.assign(row, {
+            receivedamt: cashlessRow.receivedamt,
+            actualTDS: cashlessRow.actualTDS,
+          });
+        });
       } else {
-        // If not found, just push cashless record
-        combinedPayments.push(cashlessRow);
+        combinedPayments.push({
+          ...cashlessRow,
+          cashamt: 0,
+          cardamt: 0,
+          chequeamt: 0,
+          onlineamt: 0,
+          discountamt: 0,
+          tdsamt: 0,
+        });
       }
     });
 
@@ -923,6 +953,54 @@ const getIPDTotalSummary = async (req) => {
   }
 };
 
+const getIHXData = async (req) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  const { connection, location } = getConnectionByLocation(req.query.location); // Ensure `req.params.location` is correct
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    // Using a promise-based approach to handle the connection
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) {
+          return reject(err);
+        }
+
+        const sql = `
+          SELECT i.invoice_id, i.patient_id, p.name,p.phone,p.sex, i.discount, i.status, i.payable_amt, i.totalamt, i.IHXData
+          FROM invoice i
+          JOIN patient p ON i.patient_id = p.patient_id
+          WHERE i.creation_date >= ?  
+          AND i.creation_date <= ?
+          AND i.IHXData IS NOT NULL
+          AND i.is_deleted != 1
+        `;
+
+        const queryParams = [req.query.from, req.query.to]; // Parameters for the SQL query
+
+        tempCon.query(sql, queryParams, (error, rows) => {
+          tempCon.release();
+          if (error) {
+            return reject(error);
+          }
+          resolve(rows);
+        });
+      });
+    });
+    console.log(rows);
+    return rows;
+  } catch (error) {
+    throw error;
+  }
+};
+
 module.exports = {
   getIPDCollection,
   getIPDCollectionV2,
@@ -934,4 +1012,5 @@ module.exports = {
   getIPDBillsV3,
   getStatuswiseIPDDueList,
   getIPDTotalSummary,
+  getIHXData,
 };

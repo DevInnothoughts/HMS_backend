@@ -2,6 +2,10 @@ var express = require("express");
 const {
   getPharmacyCollection,
   getPrescriptionPurchaseAnalysis,
+  getPrescriptionPurchaseAnalysisQuantity,
+  getPrescriptionPurchaseAnalysisQuantityV2,
+  getPharmacyCollectionV1,
+  getPharmacyCollectionV2,
 } = require("../models/evitalPharmacyCollectionModal");
 var router = express.Router();
 
@@ -17,9 +21,52 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+router.get("/v1", async (req, res, next) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  try {
+    const pharmacyCollection = await getPharmacyCollectionV1(req);
+    res.status(200).send(pharmacyCollection);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/v2", async (req, res, next) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  try {
+    const pharmacyCollection = await getPharmacyCollectionV2(req);
+    //console.log("Pharmacy Collection V2:", pharmacyCollection);
+    res.status(200).send(pharmacyCollection);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/prescription-analysis", async (req, res) => {
   try {
     const data = await getPrescriptionPurchaseAnalysis(req);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get("/prescription-analysis/quantity", async (req, res) => {
+  try {
+    const data = await getPrescriptionPurchaseAnalysisQuantity(req);
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get("/prescription-analysis/quantity/v1", async (req, res) => {
+  try {
+    const data = await getPrescriptionPurchaseAnalysisQuantityV2(req);
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });

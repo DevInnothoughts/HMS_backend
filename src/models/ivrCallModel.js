@@ -21,7 +21,7 @@ const getIVRCall = async (req) => {
         let sql = `
           SELECT ivr_id, call_date, call_duration, call_status, call_time, caller_no, circle_name, destination_name, destination_no, note
           FROM IVRdata
-          WHERE STR_TO_DATE(call_date, '%Y-%d-%m') >= ?
+          WHERE STR_TO_DATE(call_date, '%Y-%d-%m') >= ? AND STR_TO_DATE(call_date, '%Y-%d-%m') <= ?
           AND destination_no != ''
         `;
 
@@ -33,7 +33,7 @@ const getIVRCall = async (req) => {
 
         sql += ` ORDER BY ivr_id DESC`;
 
-        const queryParams = [req.query.from]; // Parameters for the SQL query
+        const queryParams = [req.query.from, req.query.to]; // Parameters for the SQL query
 
         tempCon.query(sql, queryParams, (error, rows) => {
           tempCon.release();

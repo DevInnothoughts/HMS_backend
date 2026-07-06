@@ -12,6 +12,7 @@ const {
   getIPDCollectionV2,
   getIPDCollectionV3,
   getIPDBillsV3,
+  getIHXData,
 } = require("../models/ipdCollectionModel");
 
 router.get("/", async (req, res, next) => {
@@ -128,6 +129,18 @@ router.get("/ipdTotalSummary", async (req, res, next) => {
   try {
     const IPDBills = await getIPDTotalSummary(req);
     res.status(200).send(IPDBills);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ihxData", async (req, res, next) => {
+  console.log(req.query.location);
+  console.log(req.query.from);
+  console.log(req.query.to);
+  try {
+    const IHXData = await getIHXData(req);
+    res.status(200).send(IHXData);
   } catch (err) {
     next(err);
   }

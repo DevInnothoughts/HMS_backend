@@ -23,6 +23,9 @@ const performanceController = require("./src/controllers/performanceController")
 const openAIController = require("./src/controllers/openAIController");
 const pharmacyController = require("./src/controllers/evitalPharmacyCollectionController");
 const reportController = require("./src/controllers/reportController");
+const leadsStatsController = require("./src/controllers/leadStatsController");
+const targetComparisonController = require("./src/controllers/targetComparisonController");
+const doctorPerformanceController = require("./src/controllers/doctorPerformanceController");
 
 const {
   syncAppointments,
@@ -32,7 +35,14 @@ const {
   getTomorrowsAppointment,
   sendScheduledWhatsAppMsg,
 } = require("./src/models/patientModel");
-const { generateAndSendReport } = require("./src/models/reportMailModel");
+const {
+  generateAndSendReport,
+  generateDSRRangeExcel,
+} = require("./src/models/reportMailModel");
+const {
+  generateReport,
+  generatePatientHistoryReport,
+} = require("./src/models/consolidatedDataModel");
 
 const locations = [
   "DP Road",
@@ -48,10 +58,10 @@ const locations = [
   "HSR",
   "Hyderabad",
   "Indiranagar",
-  "Indore",
+
   "JP Nagar",
   "Kalaburagi",
-  "Kolhapur",
+
   "Latur",
   "Ludhiana",
   "Lucknow",
@@ -72,6 +82,10 @@ const locations = [
   "Mohali",
   "Aurangabad",
   "Whitefield",
+  "Hadapsar",
+  "Kalyan",
+  "Bopal",
+  "Electronic City",
 ];
 
 app.use(express.json());
@@ -97,6 +111,9 @@ app.use("/hms/gpReferral", gpReferralController);
 app.use("/hms/aiAssistant", openAIController);
 app.use("/hms/pharmacyCollection", pharmacyController);
 app.use("/hms/report", reportController);
+app.use("/hms/leadsStats", leadsStatsController);
+app.use("/hms/targetComparison", targetComparisonController);
+app.use("/hms/doctorPerformance", doctorPerformanceController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -146,20 +163,27 @@ cron.schedule(
 
 // Schedule at 12:30 AM every day
 // cron.schedule(
-//   "*/3 * * * *",
+//   "*/2 * * * *",
 //   //"30 0 * * *",
 //   async () => {
 //     try {
 //       console.log("Generating and sending yesterday's collections report...");
-//       await generateAndSendReport("shubham.khatod17594@gmail.com"); // replace with actual email
-//       console.log("Report sent successfully.");
+//       //await generateAndSendReport("shubham.khatod17594@gmail.com"); // replace with actual email
+//       //await generateReport("2026-03-01", "2026-03-31"); // For testing, use a wide date range to get all data. Replace with actual date range in production.
+//       //generateDSRRangeExcel("2026-05-01", "2026-05-31", locations);
+//       const history = await generatePatientHistoryReport(
+//         "2026-01-01",
+//         "2026-06-30",
+//         ["Andheri", "Thane", "Navi Mumbai", "Vashi"],
+//       );
+//       console.log("Report generated successfully:", history);
 //     } catch (err) {
 //       console.error("Error in sending report:", err);
 //     }
 //   },
 //   {
 //     timezone: "Asia/Kolkata", // Ensure correct timezone
-//   }
+//   },
 // );
 
 // Start the server
