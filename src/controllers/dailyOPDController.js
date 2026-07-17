@@ -3,6 +3,7 @@ var router = express.Router();
 const {
   getDailyOPDCollection,
   getDailyOPDCollectionV1,
+  getDailyOPDCollectionV2,
 } = require("../models/DailyOPDModel");
 
 router.get("/", async (req, res, next) => {
@@ -17,7 +18,17 @@ router.get("/", async (req, res, next) => {
 
 router.get("/v1", async (req, res, next) => {
   try {
-    const result = await getDailyOPDCollectionV1(req);
+    const result = await getDailyOPDCollectionV2(req);
+    console.log("Result:", result);
+    res.status(200).send(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/v2", async (req, res, next) => {
+  try {
+    const result = await getDailyOPDCollectionV2(req);
     console.log("Result:", result);
     res.status(200).send(result);
   } catch (err) {

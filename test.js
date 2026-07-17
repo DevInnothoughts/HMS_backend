@@ -38,13 +38,8 @@ function buildInitiatePayload(p) {
     tid: p.tid,
     amount: String(p.amount),
     organization_code: p.organizationCode || "Retail",
-    additional_attribute1: p.additionalAttribute1 || "",
-    additional_attribute2: p.additionalAttribute2 || "",
-    additional_attribute3: p.additionalAttribute3 || "",
     invoiceNumber: p.invoiceNumber || "",
-    rrn: p.rrn || "",
     type: p.type || "SALE",
-    cb_amt: p.cbAmt || "",
     app_code: p.appCode || "",
     tokenisedValue: p.tokenisedValue || "",
     actionId: p.actionId || "1",
@@ -54,15 +49,17 @@ function buildInitiatePayload(p) {
 
 // --- Initiate Transaction (DIAGNOSTIC: prints every step) ---
 async function initiateTransaction() {
-  const params = {
+  const payload = {
     tid: "2532415U",
-    amount: "150",
+    amount: "1",
     actionId: "1",
-    requestUrn: "HMS-BILL-4567",
+    type: "SALE",
+    organization_code: "Retail",
+    requestUrn: "HMS-BILL-4568",
   };
-  const payload = buildInitiatePayload(params);
+  //const payload = buildInitiatePayload(params);
   const plaintext = JSON.stringify(payload);
-  const body = { data: encrypt(plaintext) };
+  const body = encrypt(plaintext);
 
   console.log("\n=== 1) PLAINTEXT payload ===\n" + plaintext);
   console.log("\n=== 2) ENCRYPTED body sent ===\n" + JSON.stringify(body));

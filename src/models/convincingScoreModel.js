@@ -70,17 +70,23 @@ function buildSpecialityBreakdown(patientSpeciality, invoicePatientIdSet) {
     if (info.subTypes && info.subTypes.length) {
       if (!subTypes[specKey]) subTypes[specKey] = {};
       for (const st of info.subTypes) {
-        const raw = st.toString().trim();
+        // Keep only Grade 1–4; merge variants ("Grade II", "grade-2") → "Grade 2".
+        const gradeMatch = st.toString().match(/grade\s*-?\s*([1-4])(?!\d)/i);
+        if (!gradeMatch) continue; // ignore anything that isn't a grade
+        const raw = `Grade ${gradeMatch[1]}`;
         const subKey = raw.toLowerCase();
         if (!subTypes[specKey][subKey]) {
-          subTypes[specKey][subKey] = { label: raw, count: 0 };
-        } else {
-          subTypes[specKey][subKey].label = preferLabel(
-            subTypes[specKey][subKey].label,
-            raw,
-          );
+          subTypes[specKey][subKey] = {
+            label: raw,
+            seen: 0,
+            advised: 0,
+            surgery: 0,
+          };
         }
-        subTypes[specKey][subKey].count += 1;
+        const t = subTypes[specKey][subKey];
+        t.seen += 1;
+        if (info.surgeryAdvised) t.advised += 1;
+        if (invoicePatientIdSet.has(patientId)) t.surgery += 1;
       }
     }
   }
@@ -99,8 +105,14 @@ function buildSpecialityBreakdown(patientSpeciality, invoicePatientIdSet) {
             ? Math.round((ipdCount / patientCount) * 1000) / 10
             : 0,
         subTypes: Object.values(subTypes[specKey] || {})
-          .map((s) => ({ name: capFirst(s.label), patientCount: s.count }))
-          .sort((a, b) => b.patientCount - a.patientCount),
+          .map((s) => ({
+            name: capFirst(s.label),
+            seen: s.seen,
+            advised: s.advised,
+            surgery: s.surgery,
+            patientCount: s.seen, // kept so any old reader still works
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
       };
     })
     .sort((a, b) => b.patientCount - a.patientCount || b.ipdCount - a.ipdCount);
@@ -796,6 +808,11 @@ WHERE d.patient_id IN (
 GROUP BY d.patient_id;
 `;
 
+    const procedureCountQuery = `SELECT patient_id, COUNT(*) AS procedureCount
+                                 FROM invoice
+                                 WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1
+                                 GROUP BY patient_id`;
+
     const sameMonthInvoiceQuery = `SELECT 
     d.patient_id,
     d.consultantDoctor,
@@ -823,6 +840,7 @@ GROUP BY d.patient_id;
       assistantDoctorRows,
       invoiceQueryRows,
       sameMonthInvoiceRows,
+      procedureCountRows,
     ] = await Promise.all([
       executeQuery(distinctDiagnosisQuery, [newPatientIds]),
       executeQuery(countsQuery, [newPatientIds]),
@@ -833,6 +851,7 @@ GROUP BY d.patient_id;
         req.query.from,
         req.query.to,
       ]),
+      executeQuery(procedureCountQuery, [req.query.from, req.query.to]),
     ]);
 
     const { consultantDoctors, assistantDoctors, totalCounts } =
@@ -841,6 +860,7 @@ GROUP BY d.patient_id;
         assistantDoctorRows,
         invoiceQueryRows,
         sameMonthInvoiceRows,
+        procedureCountRows,
       );
 
     const totalSurgeriesPerformed = consultantDoctors.reduce(
@@ -872,6 +892,7 @@ function processDiagnosisData1(
   assistantDoctorRows,
   invoiceQueryRows,
   sameMonthInvoiceRows,
+  procedureCountRows = [],
 ) {
   console.log("Processing diagnosis data...", invoiceQueryRows.length);
   // Build invoice count maps (overall invoices)
@@ -886,6 +907,28 @@ function processDiagnosisData1(
     if (row.assistanceDoctor) {
       assistantInvoiceMap[row.assistanceDoctor] =
         (assistantInvoiceMap[row.assistanceDoctor] || 0) + 1;
+    }
+  });
+
+  // Invoices (surgeries) per patient in range → total procedure counts per doctor.
+  // Same per-patient doctor attribution as the invoice maps above; a patient with
+  // 2 surgeries contributes 2. This is always >= the distinct-patient invoiceCount.
+  const procByPatient = {};
+  procedureCountRows.forEach((row) => {
+    procByPatient[row.patient_id] = row.procedureCount;
+  });
+
+  const consultantProcedureMap = {};
+  const assistantProcedureMap = {};
+  invoiceQueryRows.forEach((row) => {
+    const n = procByPatient[row.patient_id] || 1;
+    if (row.consultantDoctor) {
+      consultantProcedureMap[row.consultantDoctor] =
+        (consultantProcedureMap[row.consultantDoctor] || 0) + n;
+    }
+    if (row.assistanceDoctor) {
+      assistantProcedureMap[row.assistanceDoctor] =
+        (assistantProcedureMap[row.assistanceDoctor] || 0) + n;
     }
   });
 
@@ -910,7 +953,13 @@ function processDiagnosisData1(
   );
 
   // Helper to process diagnosis rows
-  const processRows = (rows, doctorKey, invoiceMap, surgeryMap) => {
+  const processRows = (
+    rows,
+    doctorKey,
+    invoiceMap,
+    surgeryMap,
+    procedureMap,
+  ) => {
     const doctorMap = {};
 
     rows.forEach((row) => {
@@ -974,6 +1023,7 @@ function processDiagnosisData1(
           Medication: medicationPatients,
         },
         invoiceCount: doc.invoiceCount,
+        totalSurgeriesDone: procedureMap[doc.doctorId] || 0,
         thisMonthDiagnosedAndSurgeryPerformed: doc.surgeryPerformed,
         specialities: buildSpecialityBreakdown(
           doc.patientSpeciality,
@@ -988,12 +1038,14 @@ function processDiagnosisData1(
     "consultantDoctor",
     consultantInvoiceMap,
     consultantSurgeryMap,
+    consultantProcedureMap,
   );
   const assistantDoctors = processRows(
     assistantDoctorRows,
     "assistanceDoctor",
     assistantInvoiceMap,
     assistantSurgeryMap,
+    assistantProcedureMap,
   );
 
   // ✅ Calculate total Medication & Surgery counts across all doctors

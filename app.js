@@ -26,6 +26,9 @@ const reportController = require("./src/controllers/reportController");
 const leadsStatsController = require("./src/controllers/leadStatsController");
 const targetComparisonController = require("./src/controllers/targetComparisonController");
 const doctorPerformanceController = require("./src/controllers/doctorPerformanceController");
+const serviceTicketController = require("./src/controllers/serviceTicketController");
+const convincingInsightsController = require("./src/controllers/convincingInsightsController");
+const targetComparisonNewController = require("./src/controllers/targetComparisonNewController");
 
 const {
   syncAppointments,
@@ -58,10 +61,8 @@ const locations = [
   "HSR",
   "Hyderabad",
   "Indiranagar",
-
   "JP Nagar",
   "Kalaburagi",
-
   "Latur",
   "Ludhiana",
   "Lucknow",
@@ -114,6 +115,9 @@ app.use("/hms/report", reportController);
 app.use("/hms/leadsStats", leadsStatsController);
 app.use("/hms/targetComparison", targetComparisonController);
 app.use("/hms/doctorPerformance", doctorPerformanceController);
+app.use("/hms/serviceTicket", serviceTicketController);
+app.use("/hms/convincingInsights", convincingInsightsController);
+app.use("/hms/targetComparisonNew", targetComparisonNewController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
