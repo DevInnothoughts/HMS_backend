@@ -29,6 +29,8 @@ const doctorPerformanceController = require("./src/controllers/doctorPerformance
 const serviceTicketController = require("./src/controllers/serviceTicketController");
 const convincingInsightsController = require("./src/controllers/convincingInsightsController");
 const targetComparisonNewController = require("./src/controllers/targetComparisonNewController");
+const ticketingController = require("./src/controllers/ticketingController");
+const recruitmentController = require("./src/controllers/recruitmentController");
 
 const {
   syncAppointments,
@@ -118,6 +120,8 @@ app.use("/hms/doctorPerformance", doctorPerformanceController);
 app.use("/hms/serviceTicket", serviceTicketController);
 app.use("/hms/convincingInsights", convincingInsightsController);
 app.use("/hms/targetComparisonNew", targetComparisonNewController);
+app.use("/hms/ticketing", ticketingController);
+app.use("/hms/recruitment", recruitmentController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

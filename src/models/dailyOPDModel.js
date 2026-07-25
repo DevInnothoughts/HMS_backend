@@ -2529,6 +2529,8 @@ async function getDailyOPDCollectionV2(req) {
       const labConsultations = consultations.filter((c) => c.type === "LAB");
       const labNormNames = labConsultations.map((c) => normalizeName(c.name));
 
+      const opdConsultations = consultations.filter((c) => c.type === "OPD");
+
       const hasLab = labNormNames.length > 0;
       const labPlaceholders = labNormNames.map(() => "?").join(", ");
 
@@ -2802,6 +2804,20 @@ async function getDailyOPDCollectionV2(req) {
         const total = row && row.total != null ? Number(row.total) : 0;
         consultationTotals[c.name] = { name: c.name, type: c.type, total };
       });
+
+      // OPD per-consultation totals (consultation_type = 'OPD'), same shape as LAB.
+      const opdConsultationResults = await Promise.all(
+        opdConsultations.map((c) =>
+          executeQuery(consultationTotalQuery, [currentDate, c.name]),
+        ),
+      );
+
+      const opdConsultationTotals = {};
+      opdConsultations.forEach((c, index) => {
+        const row = opdConsultationResults[index][0];
+        const total = row && row.total != null ? Number(row.total) : 0;
+        opdConsultationTotals[c.name] = { name: c.name, type: c.type, total };
+      });
       return {
         dailyOPDReport: [
           [
@@ -2862,6 +2878,13 @@ async function getDailyOPDCollectionV2(req) {
         testReport: labConsultations
           .map((c) => {
             const total = consultationTotals[c.name].total;
+            return total ? [c.name, total] : null;
+          })
+          .filter(Boolean),
+        // OPD only: consultation_type = 'OPD' in consultationMasterData.
+        opdReport: opdConsultations
+          .map((c) => {
+            const total = opdConsultationTotals[c.name].total;
             return total ? [c.name, total] : null;
           })
           .filter(Boolean),

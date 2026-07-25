@@ -441,4 +441,7 @@ module.exports = {
   getLocationStats,
   getAllLocationsStats,
   getIVRLeadsCount,
+  buildAreaWhere, // ← add
+  buildBranchWhere, // ← add
+  ALL_LOCATIONS, // ← add
 };

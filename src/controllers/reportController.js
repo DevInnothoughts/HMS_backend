@@ -16,6 +16,8 @@ const {
   getIPDDueData,
 } = require("../models/consolidatedDataModel");
 
+const { getLostLeads } = require("../models/lostLeadsModel");
+
 router.post("/", async (req, res, next) => {
   try {
     const result = await getReport(req);
@@ -137,6 +139,28 @@ router.post("/ipd-due/data", async (req, res) => {
     res.status(200).json(result);
   } catch (err) {
     console.error("IPD Due data error:", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Lost leads: leads that enquired but never booked, and leads that booked but
+// never visited. Body: { channel: "web"|"bot"|"ivr", from, to, locations: [...] }.
+// Returns JSON only — the app builds the workbook on-device.
+router.post("/lost-leads/data", async (req, res) => {
+  try {
+    const { channel, from, to, locations } = req.body;
+    if (!channel) return res.status(400).json({ error: "channel is required" });
+    if (!from || !to)
+      return res
+        .status(400)
+        .json({ error: "from and to are required (YYYY-MM-DD)" });
+    if (!Array.isArray(locations) || locations.length === 0)
+      return res.status(400).json({ error: "locations array is required" });
+
+    const result = await getLostLeads({ channel, from, to, locations });
+    res.status(200).json(result);
+  } catch (err) {
+    console.error("Lost leads error:", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

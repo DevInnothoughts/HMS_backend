@@ -45,6 +45,7 @@ const conHadapsar = createPool("hmsHadapsarDB");
 const conKalyan = createPool("hmsKalyanDB");
 const conBopal = createPool("hmsBopalDB");
 const conElectroniccity = createPool("hmsElectroniccityDB");
+const conTicketing = createPool("serviceTicketing");
 
 const getConnectionByLocation = (loc) => {
   let connection;
@@ -307,6 +308,11 @@ const getConnectionByLocation = (loc) => {
     case "Electronic City":
       connection = conElectroniccity;
       location = "Electronic City";
+      break;
+
+    case "ticketing":
+      connection = conTicketing;
+      location = "Ticketing";
       break;
 
     default:
