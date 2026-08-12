@@ -8,6 +8,8 @@ const {
   getOPDCollectionV3,
 } = require("../models/opdCollectionModel");
 
+const { getCollectionV4 } = require("../models/labCollectionModel");
+
 router.get("/", async (req, res, next) => {
   console.log(req.query.location);
   console.log(req.query.from);
@@ -51,6 +53,14 @@ router.get("/v3", async (req, res, next) => {
   try {
     const OPDCollection = await getOPDCollectionV3(req);
     res.status(200).send(OPDCollection);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/v4", async (req, res, next) => {
+  try {
+    res.status(200).send(await getCollectionV4(req));
   } catch (err) {
     next(err);
   }

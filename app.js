@@ -31,6 +31,7 @@ const convincingInsightsController = require("./src/controllers/convincingInsigh
 const targetComparisonNewController = require("./src/controllers/targetComparisonNewController");
 const ticketingController = require("./src/controllers/ticketingController");
 const recruitmentController = require("./src/controllers/recruitmentController");
+const hexaLeadController = require("./src/controllers/hexaLeadsController");
 
 const {
   syncAppointments,
@@ -89,6 +90,8 @@ const locations = [
   "Kalyan",
   "Bopal",
   "Electronic City",
+  "RR Nagar",
+  "Adajan",
 ];
 
 app.use(express.json());
@@ -122,6 +125,7 @@ app.use("/hms/convincingInsights", convincingInsightsController);
 app.use("/hms/targetComparisonNew", targetComparisonNewController);
 app.use("/hms/ticketing", ticketingController);
 app.use("/hms/recruitment", recruitmentController);
+app.use("/hms/hexaLead", hexaLeadController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -1,6 +1,22 @@
 const { default: axios } = require("axios");
 const { getConnectionByLocation } = require("../../databaseUtils");
 
+const REFERENCE_TYPE_MAP = {
+  dr_ref: "Referred By Doctor",
+  family_friends: "Family Friends",
+  hhc_board: "HHC Board",
+  HHF: "HHF",
+  internet: "Internet",
+  MediaRef: "Media Referral",
+  newspaper: "Newspaper",
+  old_ref: "Old Patient Referral",
+  other: "Other",
+  WOM: "Word of Mouth",
+  self_old_pt: "Old Patient",
+  hhc_branch: "HHC Branch",
+  null: "Unknown",
+};
+
 const getPatient = async (req) => {
   const { connection, location } = getConnectionByLocation(req.query.location);
 
@@ -170,7 +186,7 @@ async function getReference(req) {
   const { connection, location } = getConnectionByLocation(req.query.location);
   console.log(
     new Date(req.query.from).getTime(),
-    new Date(req.query.to).getTime()
+    new Date(req.query.to).getTime(),
   );
 
   if (!connection) {
@@ -228,7 +244,7 @@ async function getReference(req) {
       // Calculate total count
       let totalCount = referenceTypeCount.reduce(
         (sum, item) => sum + item.count,
-        0
+        0,
       );
 
       // Transform data with readable names and percentage calculation
@@ -286,7 +302,7 @@ async function getReferenceV2(req) {
     `;
       const [{ totalInvoiceCount }] = await executeQuery(
         totalInvoiceCountQuery,
-        [req.query.from, req.query.to]
+        [req.query.from, req.query.to],
       );
 
       // Step 2: Get reference type count
@@ -324,7 +340,7 @@ async function getReferenceV2(req) {
 
       const totalCount = referenceTypeCount.reduce(
         (sum, item) => sum + item.count,
-        0
+        0,
       );
 
       const transformedData = [];
@@ -376,6 +392,109 @@ async function getReferenceV2(req) {
   };
 
   return getCounts();
+}
+
+async function getReferenceMonthwise(req) {
+  const { connection } = getConnectionByLocation(req.query.location);
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  const executeQuery = (query, values = []) =>
+    new Promise((resolve, reject) =>
+      connection.query(query, values, (e, r) => (e ? reject(e) : resolve(r))),
+    );
+
+  // fyStart = 2025 means FY 2025-2026 (1 Apr 2025 – 31 Mar 2026)
+  const fyStart = Number(req.query.fyStart);
+  const range = (y) => [`${y}-04-01`, `${y + 1}-03-31`];
+
+  const patientsByMonth = `
+    SELECT DATE_FORMAT(date, '%Y-%m') AS ym,
+           reference_type,
+           COUNT(*) AS count
+    FROM patient
+    WHERE date >= ? AND date <= ?
+      AND Uid_no IS NOT NULL
+      AND ConfirmPatient = 1
+      AND is_deleted = 0
+    GROUP BY ym, reference_type`;
+
+  const invoicesByMonth = `
+    SELECT DATE_FORMAT(p.date, '%Y-%m') AS ym,
+           p.reference_type,
+           COUNT(*) AS invoiceCount
+    FROM invoice i
+    JOIN patient p ON i.patient_id = p.patient_id
+    WHERE p.date >= ? AND p.date <= ?
+      AND p.ConfirmPatient = 1
+      AND p.is_deleted = 0
+    GROUP BY ym, p.reference_type`;
+
+  const load = async (y) => {
+    const [pts, inv] = await Promise.all([
+      executeQuery(patientsByMonth, range(y)),
+      executeQuery(invoicesByMonth, range(y)),
+    ]);
+    const map = {}; // ym -> { total, invoices, byType, invoiceByType }
+    const bucket = (ym) =>
+      (map[ym] ||= { total: 0, invoices: 0, byType: {}, invoiceByType: {} });
+
+    pts.forEach((r) => {
+      const b = bucket(r.ym);
+      const t = r.reference_type || "null";
+      b.total += r.count;
+      b.byType[t] = (b.byType[t] || 0) + r.count;
+    });
+    inv.forEach((r) => {
+      const b = bucket(r.ym);
+      const t = r.reference_type || "null";
+      b.invoices += r.invoiceCount;
+      b.invoiceByType[t] = (b.invoiceByType[t] || 0) + r.invoiceCount;
+    });
+    return map;
+  };
+
+  const [cur, prev] = await Promise.all([load(fyStart), load(fyStart - 1)]);
+
+  // Fiscal order: Apr … Mar
+  const FY_ORDER = [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3];
+  const MONTH_SHORT = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const empty = { total: 0, invoices: 0, byType: {}, invoiceByType: {} };
+  const key = (y, m) => `${y}-${String(m).padStart(2, "0")}`;
+
+  const months = FY_ORDER.map((m) => {
+    const cy = m >= 4 ? fyStart : fyStart + 1;
+    return {
+      month: m,
+      label: MONTH_SHORT[m - 1],
+      key: key(cy, m),
+      current: cur[key(cy, m)] || empty,
+      previous: prev[key(cy - 1, m)] || empty,
+    };
+  });
+
+  return {
+    fy: { label: `${fyStart}-${fyStart + 1}`, start: fyStart },
+    previousFy: { label: `${fyStart - 1}-${fyStart}`, start: fyStart - 1 },
+    referenceTypeMap: REFERENCE_TYPE_MAP, // lift the existing inline map to a const
+    months,
+  };
 }
 
 async function getTomorrowsAppointment(loc) {
@@ -433,7 +552,7 @@ async function getTomorrowsAppointment(loc) {
 
           //console.log(rows); // Log the fetched appointments
           resolve(rows);
-        }
+        },
       );
     });
   });
@@ -444,15 +563,15 @@ const sendScheduledWhatsAppMsg = async (
   appoDate,
   appoTime,
   branchLocation,
-  fdName
+  fdName,
 ) => {
   // Define the start and end time
   const startTime = new Date(`1970-01-01T${appoTime}:00`).toLocaleTimeString(
     [],
-    { hour: "2-digit", minute: "2-digit" }
+    { hour: "2-digit", minute: "2-digit" },
   );
   const endTime = new Date(
-    new Date(`1970-01-01T${appoTime}:00`).getTime() + 60 * 60 * 1000
+    new Date(`1970-01-01T${appoTime}:00`).getTime() + 60 * 60 * 1000,
   ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const timeRange = `${startTime} to ${endTime}`;
@@ -698,4 +817,5 @@ module.exports = {
   getTomorrowsAppointment,
   sendScheduledWhatsAppMsg,
   getPatientsDiagnosis,
+  getReferenceMonthwise,
 };

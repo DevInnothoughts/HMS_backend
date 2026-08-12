@@ -2,9 +2,9 @@ const crypto = require("crypto");
 
 // --- Worldline UAT config ---
 const CONFIG = {
-  url: "https://bouat.mrlpay.com/pcpos4/TransactionRequest.php?source=629",
-  aesKey: "X5mUl3J1jneCd0adISoHWDTj7U8Rnhvd", // 32 chars -> AES-256
-  aesIv: "1111111245683783", // 16 chars
+  url: "https://lb.mrlpay.com/pcpos4/TransactionRequest.php?source=988",
+  aesKey: "bTrpIKF4VDZf1MwUx1N362L0aeyzSUu2", // 32 chars -> AES-256
+  aesIv: "czAJaZIH3DTgbz0w", // 16 chars
 };
 
 // --- AES-256-CBC encrypt / decrypt ---
@@ -50,7 +50,7 @@ function buildInitiatePayload(p) {
 // --- Initiate Transaction (DIAGNOSTIC: prints every step) ---
 async function initiateTransaction() {
   const payload = {
-    tid: "2532415U",
+    tid: "65136209",
     amount: "1",
     actionId: "1",
     type: "SALE",

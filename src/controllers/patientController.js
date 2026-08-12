@@ -6,6 +6,7 @@ const {
   getReference,
   getReferenceV2,
   getPatientsDiagnosis,
+  getReferenceMonthwise,
 } = require("../models/patientModel");
 
 router.get("/", async (req, res, next) => {
@@ -48,6 +49,17 @@ router.get("/referenceV2", async (req, res, next) => {
   try {
     const result = await getReferenceV2(req);
     res.status(200).send(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/referenceMonthwise", async (req, res, next) => {
+  try {
+    if (!req.query.fyStart) {
+      return res.status(400).json({ error: "`fyStart` is required" });
+    }
+    res.status(200).json(await getReferenceMonthwise(req));
   } catch (err) {
     next(err);
   }

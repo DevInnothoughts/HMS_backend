@@ -6,13 +6,14 @@
 //  message; the actual send goes through services/mailer.js.
 //
 //  Recipient sources (the backend is MySQL-only and never touches Firestore):
-//   • Department Head / Department User → the ticket_user roster (by department
-//     or by assignee mobile).
+//   • Department Head → the ticket_user roster, by department. There is no
+//     assignee lookup any more: PDF §2 made a department one head, assigned
+//     off-system, so the head IS the recipient.
 //   • Partner / raiser and Cluster Head → NOT in MySQL, so their addresses are
 //     carried on the ticket (raised_by_email, cluster_head_email), passed by the
 //     app at raise time.
 //
-//  resolveRecipients() is a pure-ish function (its only side effect is reading
+//  resolveNotification() is a pure-ish function (its only side effect is reading
 //  the roster via the injected query fn), which makes the who-gets-what logic
 //  unit-testable without SMTP.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,18 +41,16 @@ const THEME = {
 const PILL = {
   // priorities
   Critical: { bg: "#ffe8e8", fg: "#d94141" },
-  High: { bg: "#fff1df", fg: "#df8a28" },
   Medium: { bg: "#eaf1ff", fg: "#3478f6" },
   Low: { bg: "#edf7ef", fg: "#0e8f65" },
   // statuses
   Open: { bg: "#fff1df", fg: "#df8a28" },
-  Rejected: { bg: "#ffe8e8", fg: "#d94141" },
+  // Amber, not red. Being asked to rethink a request is not a failure, and
+  // colouring it like one makes every Cluster Head reluctant to use it.
+  "Sent Back": { bg: "#fff1df", fg: "#df8a28" },
   Approved: { bg: "#eaf1ff", fg: "#3478f6" },
-  Reverted: { bg: "#ffe8e8", fg: "#d94141" },
-  Assigned: { bg: "#eaf1ff", fg: "#3478f6" },
   "In Progress": { bg: "#eaf1ff", fg: "#3478f6" },
   "Waiting for Vendor": { bg: "#fff1df", fg: "#df8a28" },
-  "Pending Approval": { bg: "#fff1df", fg: "#df8a28" },
   Resolved: { bg: "#edf7ef", fg: "#0e8f65" },
   Closed: { bg: "#f0f4f2", fg: "#3c4d45" },
   Reopened: { bg: "#ffe8e8", fg: "#d94141" },
@@ -68,17 +67,18 @@ function pill(value) {
 }
 
 // Human-readable label for each activity action, for the timeline in the email.
+// These keys must match ACTION_LOG in ticketingModel.js — that is what gets
+// written to ticket_activity.action and passed to notifyForTicket().
 const ACTION_LABEL = {
   RAISED: "Raised",
   APPROVED: "Approved",
-  REJECTED: "Rejected",
-  ROUTED: "Re-routed",
-  ASSIGNED: "Assigned",
-  REVERTED: "Sent back to Cluster Head",
+  SENT_BACK: "Sent back",
+  SENT_TO_BRANCH: "Sent to branch to fix",
+  FIXED_LOCALLY: "Fixed at the branch",
+  REASSIGNED: "Re-assigned — wrong department",
+  FORWARDED: "Forwarded",
   PROGRESS: "Progress update",
-  FIXED: "Marked fixed",
-  DEPT_APPROVED: "Fix approved",
-  SENT_BACK: "Fix sent back",
+  RESOLVED: "Resolved",
   CLOSED: "Closed",
   REOPENED: "Reopened",
   COMMENT: "Comment",
@@ -132,11 +132,16 @@ async function buildTimeline(ticketId, run) {
   }
   if (!rows.length) return { html: "", text: "" };
 
+  // The remark is kept RAW here and the " — " separator added at render time.
+  // It used to be prefixed here and un-prefixed with .slice(3) below, which
+  // silently depended on that separator staying exactly three characters long.
+  // An approve remark now reads "Priority changed from Critical to Medium.
+  // Resolution time: 48 hours" — the text you least want quietly truncated.
   const items = rows.map((r) => {
     const label = ACTION_LABEL[r.action] || r.action;
     const when = fmtWhen(r.created_at);
     const by = r.actor_name ? ` by ${r.actor_name}` : "";
-    const remark = r.remark ? ` — ${r.remark}` : "";
+    const remark = r.remark || "";
     return { label, when, by, remark };
   });
 
@@ -151,7 +156,7 @@ async function buildTimeline(ticketId, run) {
         `<div style="font-size:13px;color:${THEME.text};font-weight:600">${escapeHtml(it.label)}` +
         `<span style="font-weight:400;color:${THEME.muted}">${escapeHtml(it.by)}</span></div>` +
         (it.remark
-          ? `<div style="font-size:12px;color:${THEME.muted};margin-top:1px">${escapeHtml(it.remark.slice(3))}</div>`
+          ? `<div style="font-size:12px;color:${THEME.muted};margin-top:1px">${escapeHtml(it.remark)}</div>`
           : "") +
         `<div style="font-size:11px;color:${THEME.muted};margin-top:1px">${escapeHtml(it.when)}</div>` +
         `</td></tr>`,
@@ -170,7 +175,8 @@ async function buildTimeline(ticketId, run) {
     items
       .map(
         (it) =>
-          `  • ${it.label}${it.by}${it.remark}${it.when ? ` (${it.when})` : ""}`,
+          `  • ${it.label}${it.by}${it.remark ? ` — ${it.remark}` : ""}` +
+          `${it.when ? ` (${it.when})` : ""}`,
       )
       .join("\n");
 
@@ -181,21 +187,6 @@ const ok = (e) =>
   typeof e === "string" && EMAIL_RE.test(e.trim()) ? e.trim() : null;
 
 /**
- * Look up an active roster user's email by mobile.
- * @param {(sql:string, params:any[]) => Promise<any[]>} run
- */
-async function rosterEmailByMobile(run, mobile) {
-  if (!mobile) return null;
-  const rows = await run(
-    `SELECT email FROM ticket_user
-      WHERE mobile = ? AND is_active = 1 AND is_deleted = 0 AND email IS NOT NULL
-      LIMIT 1`,
-    [mobile],
-  );
-  return rows.length ? ok(rows[0].email) : null;
-}
-
-/**
  * The active Department Head's email for a department.
  */
 async function deptHeadEmail(run, department) {
@@ -204,6 +195,7 @@ async function deptHeadEmail(run, department) {
     `SELECT email FROM ticket_user
       WHERE department = ? AND ticket_role = 'Department Head'
         AND is_active = 1 AND is_deleted = 0 AND email IS NOT NULL
+      ORDER BY ticket_user_id DESC
       LIMIT 1`,
     [department],
   );
@@ -211,63 +203,71 @@ async function deptHeadEmail(run, department) {
 }
 
 // What each action means for notification: who is now responsible, and the line
-// that tells them why they're getting the mail. `who` returns an email (or null
-// if we can't resolve one — then no mail is sent). `line` is the one-sentence
-// call to action.
+// that tells them why they're getting the mail. `who` returns an email, or an
+// array of them, or null when we can't resolve one — then no mail is sent.
+// `line` is the one-sentence call to action.
 //
-// Actions with no new owner (progress updates, comments, plain close) return
-// null and send nothing.
+// Actions with no new owner (progress updates, comments) return null and send
+// nothing.
 const RULES = {
-  // Raised → Open: the Cluster Head must approve. Their address rides on the
-  // ticket (the app passed it at raise).
   RAISED: {
     who: (t) => ok(t.cluster_head_email),
     line: (t) => `A new ticket for ${t.branch_name} needs your approval.`,
   },
-  // Approved → the Department Head assigns it.
+  // Approved → the department head works it themselves (PDF §2). The raiser is
+  // copied because this is where they learn the priority and the resolution
+  // time their Cluster Head committed to.
   APPROVED: {
-    who: (t, run) => deptHeadEmail(run, t.department),
-    line: (t) =>
-      `A ticket has been approved for ${t.department} — please assign it.`,
+    who: async (t, run) => [
+      await deptHeadEmail(run, t.department),
+      ok(t.raised_by_email),
+    ],
+    line: (t) => `A ticket has been approved for ${t.department}.`,
   },
-  // Re-routed to the correct department → that Department Head assigns it.
-  ROUTED: {
-    who: (t, run) => deptHeadEmail(run, t.department),
-    line: (t) =>
-      `A ticket has been routed to ${t.department} — please assign it.`,
-  },
-  // Rejected → tell the raiser.
-  REJECTED: {
+  SENT_BACK: {
     who: (t) => ok(t.raised_by_email),
-    line: () => `Your ticket was reviewed and could not be approved.`,
+    line: () => `Your ticket has been sent back to be reconsidered.`,
   },
-  // Assigned → the Department User who now owns it.
-  ASSIGNED: {
-    who: (t, run) => rosterEmailByMobile(run, t.assignee_mobile),
-    line: () => `A ticket has been assigned to you.`,
+  // The branch is being asked to do the work themselves.
+  SENT_TO_BRANCH: {
+    who: (t) => ok(t.raised_by_email),
+    line: (t) =>
+      `Your ticket is for ${t.branch_name} to fix locally — please action it.`,
   },
-  // Dept Head bounced it back as wrong department → the Cluster Head re-routes.
-  REVERTED: {
+  // Back to the Cluster Head to sign off.
+  FIXED_LOCALLY: {
     who: (t) => ok(t.cluster_head_email),
     line: (t) =>
-      `A ticket for ${t.branch_name} was sent back as the wrong department — please re-route it.`,
+      `${t.branch_name} has fixed a ticket — please review and resolve it.`,
   },
-  // Fix submitted → the Department Head signs it off.
-  FIXED: {
-    who: (t, run) => deptHeadEmail(run, t.department),
-    line: () => `A fix is waiting for your sign-off.`,
+  // PDF §5 — the ticket moved to the right department. The head there picks it
+  // up; the raiser is told it moved and why.
+  REASSIGNED: {
+    who: async (t, run) => [
+      await deptHeadEmail(run, t.department),
+      ok(t.raised_by_email),
+    ],
+    line: (t) =>
+      `A ticket has been re-assigned to ${t.department} as the correct department.`,
   },
-  // Fix signed off → Resolved → the raiser confirms/closes.
-  DEPT_APPROVED: {
+  // PDF §5 — the previous department finished their part.
+  FORWARDED: {
+    who: async (t, run) => [
+      await deptHeadEmail(run, t.department),
+      ok(t.raised_by_email),
+    ],
+    line: (t) => `A ticket has been forwarded to ${t.department} to continue.`,
+  },
+  RESOLVED: {
     who: (t) => ok(t.raised_by_email),
-    line: () => `Your ticket has been resolved — please review and close it.`,
+    line: () => `Your ticket has been resolved.`,
   },
-  // Dept Head sent the fix back → the Department User reworks it.
-  SENT_BACK: {
-    who: (t, run) => rosterEmailByMobile(run, t.assignee_mobile),
-    line: () => `Your fix was sent back for more work.`,
+  // The department head closes without the branch's say-so now (PDF §2), so the
+  // branch has to be told rather than doing it themselves.
+  CLOSED: {
+    who: (t) => ok(t.raised_by_email),
+    line: () => `Your ticket has been closed.`,
   },
-  // Raiser reopened → back to the Department Head to re-handle.
   REOPENED: {
     who: (t, run) => deptHeadEmail(run, t.department),
     line: () =>
@@ -287,7 +287,14 @@ async function resolveNotification(ticket, action, run) {
   const rule = RULES[action];
   if (!rule) return null;
 
-  const to = await rule.who(ticket, run);
+  // A rule may name one recipient or several. De-duplicated because a
+  // self-approved ticket resolves the same person twice — the raiser is also
+  // the approver — and nobody should get the same mail in duplicate.
+  const resolved = await rule.who(ticket, run);
+  const list = (Array.isArray(resolved) ? resolved : [resolved]).filter(
+    Boolean,
+  );
+  const to = [...new Set(list)].join(", ");
   if (!to) return null; // no resolvable/valid address → send nothing
 
   const ref = ticket.ticket_ref || `#${ticket.ticket_id}`;
@@ -306,6 +313,12 @@ async function resolveNotification(ticket, action, run) {
     ["Priority", ticket.priority],
     ["Status", ticket.status],
   ];
+  // Only once a Cluster Head has approved and set one (PDF §4). Before that
+  // there is no deadline to quote, and inventing one would be a promise nobody
+  // has made.
+  if (ticket.sla_hours) {
+    facts.push(["Resolution time", `${ticket.sla_hours} hours`]);
+  }
 
   const text =
     `${line}\n\n` +

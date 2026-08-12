@@ -13,27 +13,19 @@
 //   GET    /meta                     departments, issue types, priorities, statuses
 //   GET    /tickets                  role-scoped list  (+ filters)
 //   GET    /tickets/:id              one ticket + activity trail + attachments
-//   POST   /tickets                  raise            (Partner | Cluster Head)
+//   POST   /tickets                  raise            (Partner | Branch Admin | SuperAdmin)
 //   GET    /dashboard                role-scoped counters
 //
 //   POST   /tickets/:id/approve      Cluster Head  → Approved
-//   POST   /tickets/:id/reject       Cluster Head  → Rejected
-//   POST   /tickets/:id/route        Cluster Head  → Approved (re-route a revert)
-//   POST   /tickets/:id/assign       Dept Head     → Assigned
-//   POST   /tickets/:id/revert       Dept Head     → Reverted  (wrong department)
-//   POST   /tickets/:id/progress     Dept User     → In Progress | Waiting for Vendor
-//   POST   /tickets/:id/fix          Dept User     → Pending Approval
-//   POST   /tickets/:id/dept-approve Dept Head     → Resolved
-//   POST   /tickets/:id/send-back    Dept Head     → Assigned
-//   POST   /tickets/:id/close        Raiser        → Closed
+//                                     (sets department, priority, resolution time)
+//   POST   /tickets/:id/reconsider   Cluster Head  → Sent Back
+//   POST   /tickets/:id/progress     Dept Head     → In Progress | Waiting for Vendor
+//   POST   /tickets/:id/reassign     Dept Head     → Approved, new department (wrong one)
+//   POST   /tickets/:id/forward      Dept Head     → Approved, new department (work done)
+//   POST   /tickets/:id/resolve      Dept Head     → Resolved
+//   POST   /tickets/:id/close        Dept Head     → Closed
 //   POST   /tickets/:id/reopen       Raiser        → Reopened
 //   POST   /tickets/:id/comment      anyone with access
-//
-//   GET    /users                    Dept Head: their department roster
-//   GET    /users/assignees          Dept Head: who a ticket can go to
-//   POST   /users                    Dept Head: add
-//   PUT    /users/:id                Dept Head: edit
-//   DELETE /users/:id                Dept Head: remove (soft)
 //
 //   POST   /roster                   Admin panel: upsert a Head/User roster row
 //                                     (pairs with AddUserForm's Firestore write)
@@ -41,7 +33,6 @@
 //
 // Every call identifies the caller with actorMobile / actorName / actorRole /
 // actorSubRole (+ branch, branches) — query string on GET, body on POST/PUT.
-// This mirrors how /hms/approval already passes `user` and `subRole`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 var express = require("express");
@@ -89,41 +80,33 @@ const send = (handler) => async (req, res, next) => {
 /** A status change. `action` is the key in the model's TRANSITIONS table. */
 const transition = (action) => send((req) => transitionTicket(req, action));
 
-// ─── reference data ──────────────────────────────────────────────────────────
-router.get("/meta", send(getMeta));
-
-// ─── dashboard ───────────────────────────────────────────────────────────────
-router.get("/dashboard", send(getDashboard));
-
-// ─── roster (requirement 9) ──────────────────────────────────────────────────
-// Declared before /tickets/:id so "users" is never read as a ticket id.
-router.get("/users/assignees", send(listAssignees));
-router.get("/users", send(listUsers));
-router.post("/users", send(addUser));
-router.put("/users/:id", send(updateUser));
-router.delete("/users/:id", send(deleteUser));
-
 // ─── roster onboarding from the admin panel ──────────────────────────────────
-// AddUserForm writes the Firestore login and calls these to write the matching
-// ticket_user row — the two together make a usable Head or Department User.
+// The in-app /users CRUD is gone with PDF §2 — a head has no team to manage.
+// These two remain because they are how a Department Head gets a roster row at
+// all, and without one they resolve to department = null and see nothing.
 router.post("/roster", send(upsertRosterUser));
 router.delete("/roster", send(removeRosterUser));
 
 // ─── tickets ─────────────────────────────────────────────────────────────────
+router.get("/meta", send(getMeta));
+router.get("/dashboard", send(getDashboard));
 router.get("/tickets", send(listTickets));
 router.post("/tickets", send(createTicket));
 router.get("/tickets/:id", send(getTicket));
 
 // ─── workflow ────────────────────────────────────────────────────────────────
 router.post("/tickets/:id/approve", transition("approve"));
-router.post("/tickets/:id/reject", transition("reject"));
-router.post("/tickets/:id/route", transition("route"));
-router.post("/tickets/:id/assign", transition("assign"));
-router.post("/tickets/:id/revert", transition("revert"));
+router.post("/tickets/:id/reconsider", transition("reconsider"));
+// Local fix (Operations) — the Cluster Head hands it to the branch instead of a
+// department, and signs off the branch's own fix.
+router.post("/tickets/:id/send-to-branch", transition("sendToBranch"));
+router.post("/tickets/:id/fixed-locally", transition("fixedLocally"));
+router.post("/tickets/:id/resolve-local", transition("resolveLocal"));
+router.post("/tickets/:id/close-local", transition("closeLocal"));
 router.post("/tickets/:id/progress", transition("progress"));
-router.post("/tickets/:id/fix", transition("fix"));
-router.post("/tickets/:id/dept-approve", transition("deptApprove"));
-router.post("/tickets/:id/send-back", transition("sendBack"));
+router.post("/tickets/:id/reassign", transition("reassign"));
+router.post("/tickets/:id/forward", transition("forward"));
+router.post("/tickets/:id/resolve", transition("resolve"));
 router.post("/tickets/:id/close", transition("close"));
 router.post("/tickets/:id/reopen", transition("reopen"));
 router.post("/tickets/:id/comment", transition("comment"));

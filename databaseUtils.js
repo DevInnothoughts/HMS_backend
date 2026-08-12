@@ -46,6 +46,8 @@ const conKalyan = createPool("hmsKalyanDB");
 const conBopal = createPool("hmsBopalDB");
 const conElectroniccity = createPool("hmsElectroniccityDB");
 const conTicketing = createPool("serviceTicketing");
+const conRRNagar = createPool("hmsRRNagarDB");
+const conAdajan = createPool("hmsAdajanDB");
 
 const getConnectionByLocation = (loc) => {
   let connection;
@@ -308,6 +310,18 @@ const getConnectionByLocation = (loc) => {
     case "Electronic City":
       connection = conElectroniccity;
       location = "Electronic City";
+      break;
+
+    case "RR Nagar":
+    case "Rajarajeshwari Nagar":
+      connection = conRRNagar;
+      location = "RR Nagar";
+      break;
+
+    case "Adajan":
+    case "Adajan Gam":
+      connection = conAdajan;
+      location = "Adajan";
       break;
 
     case "ticketing":
