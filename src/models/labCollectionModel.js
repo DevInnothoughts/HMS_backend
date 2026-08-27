@@ -247,7 +247,7 @@ async function getCollectionV4(req) {
         )
           .filter(Boolean)
           .sort()
-      : ["CONSULTATION", "PROCTOSCOPY", "FOLLOW-UP", "BUGSPEAKS"];
+      : ["CONSULTATION", "PROCTOSCOPY", "FOLLOW-UP", "POSTOPERATIVE"];
 
   const { consultationTotals, consultationPaymentModeTotals } =
     computeAggregates(rows, groups);

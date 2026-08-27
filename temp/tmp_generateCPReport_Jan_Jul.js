@@ -1,68 +1,71 @@
 /**
- * tmp_generateNewPatientsReport_Jan_Jul.js  —  TEMPORARY / THROWAWAY SCRIPT
+ * tmp_generateCPReport_Jan_Jul.js  —  TEMPORARY / THROWAWAY SCRIPT
  * ---------------------------------------------------------------------------
- * Month-wise, LOCATION-WISE NEW PATIENT COUNT:
+ * Month-wise, LOCATION-WISE C+P COUNT:
  *
  *      Jan–Jul 2026   vs   Jan–Jul 2025
  *
- * Unlike the surgery / OPD / revenue runners, there is NO existing model for
- * this — no monthwiseNewPatientsModel exists in src/models. So this file is
- * self-contained: it queries the branch DBs directly and builds the workbook
- * itself, deliberately mirroring the structure and SheetJS style of
- * opdRevenueReportModel.js so the output looks like the other three reports.
+ * "C+P" is the label used on the admin dashboard card (src/admin/AdminHome.js),
+ * which renders dashboardValues.dailyOPDReport.procto — i.e. the PROCTOSCOPY
+ * count from patient_itemreceipt. The daily/OPD screens
+ * (DailyOPDReport.js / OPDApproval.js) show the same number under the column
+ * header 'PROCTOSCOPY'. Same figure, two labels.
  *
- * If this report is wanted permanently, lift the SQL + builders out of here
- * into src/models/newPatientsReportModel.js and reduce this file to a runner.
+ * Like the new-patients script, there is NO existing month-wise model for this,
+ * so this file is self-contained: it queries the branch DBs directly and builds
+ * the workbook itself, mirroring the style of opdRevenueReportModel.js.
+ *
+ * ── Source query ────────────────────────────────────────────────────────────
+ * Taken from dashboardModel.js's proctoscopyCountQuery (the RANGE variant —
+ * dailyOPDModel.js has the same query bounded to a single day with item_date = ?):
+ *
+ *     SELECT COUNT(consultation) AS proctoscopy
+ *     FROM patient_itemreceipt
+ *     WHERE item_date >= ? AND item_date <= ?
+ *       AND consultation = 'PROCTOSCOPY'
+ *       AND is_deleted != 1
+ *
+ * This script keeps that filter EXACTLY and only adds MONTH(item_date) grouping,
+ * so the totals reconcile with the dashboard card for the same date range.
  *
  * ═══════════════════════════════════════════════════════════════════════════
- *  READ THIS BEFORE CIRCULATING THE NUMBERS — "new patient" is not one thing
+ *  TWO THINGS TO CHECK BEFORE CIRCULATING
  * ═══════════════════════════════════════════════════════════════════════════
- * The codebase counts new patients THREE different ways:
  *
- *   (A) targetComparisonModel.getNewPatientCount, targetComparisonNewModel,
- *       dailyOPDModel, dashboardModel:
- *           patient_type='New' AND is_deleted!=1 AND executivechk=2
+ * 1. EXACT STRING MATCH. The filter is consultation = 'PROCTOSCOPY'. Elsewhere
+ *    in dailyOPDModel.js several consultation lookups defend against messy data
+ *    with REPLACE(LOWER(consultation), ' ', '') — e.g. 'bloodtests+ecg',
+ *    'sitzbath'. The proctoscopy query does NOT. MySQL's default collation is
+ *    case-insensitive and ignores trailing spaces, so 'Proctoscopy ' still
+ *    matches — but a variant like 'PROCTOSCOPY + CONSULTATION' or
+ *    'PROCTO' would be silently EXCLUDED from the count.
  *
- *   (B) DoctorPerformanceModel:
- *           (A) + AND confirm_time != '0'
- *       (its comment claims parity with Target Comparison, but the extra
- *        confirm_time clause means it does NOT match — (B) <= (A).)
+ *    Because this report spans 14 months rather than one day, any such variant
+ *    accumulates. So the workbook includes a "Consultation Audit" sheet listing
+ *    every distinct consultation value matching '%PROCTO%' with its row count,
+ *    flagging which ones the C+P filter actually picks up. CHECK THAT SHEET. If
+ *    it shows meaningful volume under a non-matching variant, the headline
+ *    number is understated and you should widen the filter before sending.
  *
- *   (C) performanceModel:
- *           patient_type='New' AND is_deleted!=1 AND confirm_time!='0'
- *           (no executivechk)
+ * 2. ROWS, NOT PATIENTS. COUNT(consultation) counts itemreceipt ROWS, so a
+ *    patient billed for two proctoscopies counts twice. That is what the
+ *    dashboard does, so it stays as the headline. COUNT(DISTINCT patient_id) is
+ *    computed alongside so you can see the gap.
  *
- * This script defaults to (A), because that is what the Target Comparison
- * screen shows management as "New Patients" — so these figures reconcile with
- * that dashboard. Flip REQUIRE_CONFIRM_TIME to true to get definition (B),
- * i.e. only patients who actually showed up.
- *
- * The two will NOT agree. Decide which one you are reporting BEFORE sending
- * the file, and say so in the covering mail — otherwise someone will diff it
- * against the Target Comparison screen and raise a query.
- *
- * ── Counting note ───────────────────────────────────────────────────────────
- * Definition (A) uses COUNT(patient_type) — it counts appointment ROWS, so one
- * patient with two 'New' rows in a month counts twice. That is what Target
- * Comparison does, so it is kept as the headline figure for reconciliation.
- * COUNT(DISTINCT patient_id) is ALSO computed and written to its own sheet, so
- * you can see how far apart the two are. If the gap is large on any branch,
- * that branch likely has duplicate registrations worth investigating.
- *
- * ── Date column ─────────────────────────────────────────────────────────────
- * appointment_timestamp is a DATE column (Target Comparison bounds it with a
- * plain date BETWEEN), so month boundaries are exact — no timezone handling.
+ * ── item_date ───────────────────────────────────────────────────────────────
+ * A DATE column (same as the OPD report, which buckets on MONTH(item_date)),
+ * so month boundaries are exact — no timezone drift.
  *
  * ── Place this file at the PROJECT ROOT ──────────────────────────────────────
  * (next to app.js / databaseUtils.js / dbconfig.js).
  *
  * ── Run ─────────────────────────────────────────────────────────────────────
- *   node tmp_generateNewPatientsReport_Jan_Jul.js
- *   node tmp_generateNewPatientsReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi"
- *   node tmp_generateNewPatientsReport_Jan_Jul.js "Andheri,Thane" 2026 1 7
+ *   node tmp_generateCPReport_Jan_Jul.js
+ *   node tmp_generateCPReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi"
+ *   node tmp_generateCPReport_Jan_Jul.js "Andheri,Thane" 2026 1 7
  *
  * ── Output ──────────────────────────────────────────────────────────────────
- *   src/report/Monthwise_NewPatients_2026_vs_2025_01-07.xlsx
+ *   src/report/Monthwise_CP_2026_vs_2025_01-07.xlsx
  *
  * DELETE THIS FILE once the workbook has been generated.
  * ---------------------------------------------------------------------------
@@ -75,7 +78,7 @@ const { getConnectionByLocation } = require("../databaseUtils");
 
 /* ── Config ──────────────────────────────────────────────────────────────── */
 
-// Same four branches as the other Jan–Jun workbooks, same order.
+// Same four branches, same order as the other Jan–Jun workbooks.
 const DEFAULT_LOCATIONS = [
   "HSR",
   "Indiranagar",
@@ -88,9 +91,12 @@ const DEFAULT_LOCATIONS = [
   "RR Nagar",
 ];
 
-// false → definition (A), matches the Target Comparison screen  [DEFAULT]
-// true  → definition (B), only patients who actually turned up
-const REQUIRE_CONFIRM_TIME = false;
+// The exact consultation value the dashboard counts as C+P.
+const CP_CONSULTATION = "PROCTOSCOPY";
+
+// Audit sheet: distinct consultation values matching this LIKE pattern, so you
+// can spot near-miss spellings the exact-match filter drops.
+const CP_AUDIT_PATTERN = "%PROCTO%";
 
 const argLocations = (process.argv[2] || "")
   .split(",")
@@ -106,8 +112,6 @@ const END_MONTH = Number(process.argv[5]) || 7; // ← July
 
 /* ── Shared helpers (same conventions as the other report models) ─────────── */
 
-// Mirrors the other models: they write to src/report from src/models via
-// ("..", "report"). This file lives at the root, so it's ("src", "report").
 const reportsDir = path.join(__dirname, "src", "report");
 if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
 
@@ -136,7 +140,6 @@ const pctChange = (cur, prev) =>
 const NUM_FMT = '#,##0;(#,##0);"-"';
 const PCT_FMT = '0.0%;(0.0%);"-"';
 
-// Change as a FRACTION for Excel's percent format. null => "N/A".
 function pctFraction(cur, prev) {
   if (prev > 0) return (cur - prev) / prev;
   return cur > 0 ? null : 0;
@@ -152,21 +155,34 @@ function formatColumn(ws, colIdx, firstRow, lastRow, fmt) {
 
 /* ── SQL ─────────────────────────────────────────────────────────────────── */
 
-// Definition (A) by default; the confirm_time line is appended only when
-// REQUIRE_CONFIRM_TIME is on, so the default query is byte-for-byte the
-// Target Comparison filter plus the month grouping.
-const NEW_PATIENT_SQL = `
+// dashboardModel's proctoscopyCountQuery filter, verbatim, + month grouping.
+// COUNT(consultation) is kept (not COUNT(*)) to match the source exactly.
+const CP_SQL = `
   SELECT
-    MONTH(appointment_timestamp) AS mon,
-    COUNT(patient_type)          AS new_rows,
-    COUNT(DISTINCT patient_id)   AS new_distinct
-  FROM appointment
-  WHERE appointment_timestamp >= ? AND appointment_timestamp <= ?
-    AND patient_type = 'New'
+    MONTH(item_date)           AS mon,
+    COUNT(consultation)        AS cp_rows,
+    COUNT(DISTINCT patient_id) AS cp_distinct,
+    SUM(COALESCE(total, 0))    AS cp_revenue
+  FROM patient_itemreceipt
+  WHERE item_date >= ? AND item_date <= ?
+    AND consultation = ?
     AND is_deleted != 1
-    AND executivechk = 2
-    ${REQUIRE_CONFIRM_TIME ? "AND confirm_time != '0'" : ""}
-  GROUP BY MONTH(appointment_timestamp)
+  GROUP BY MONTH(item_date)
+`;
+
+// Audit: every distinct consultation spelling in the window that looks like a
+// proctoscopy. Cheap, and the only way to know the exact match isn't leaking.
+const CP_AUDIT_SQL = `
+  SELECT
+    consultation,
+    COUNT(*)                AS rows_cnt,
+    SUM(COALESCE(total, 0)) AS revenue
+  FROM patient_itemreceipt
+  WHERE item_date >= ? AND item_date <= ?
+    AND is_deleted != 1
+    AND consultation LIKE ?
+  GROUP BY consultation
+  ORDER BY rows_cnt DESC
 `;
 
 /* ── Per (location, year) fetch ──────────────────────────────────────────── */
@@ -186,24 +202,43 @@ async function collectLocationYear(loc, year, monthList) {
   const endDay = new Date(year, lastM, 0).getDate();
   const end = `${year}-${pad2(lastM)}-${pad2(endDay)}`;
 
-  const rows = await run(NEW_PATIENT_SQL, [start, end]);
+  const [rows, auditRows] = await Promise.all([
+    run(CP_SQL, [start, end, CP_CONSULTATION]),
+    run(CP_AUDIT_SQL, [start, end, CP_AUDIT_PATTERN]),
+  ]);
 
   const monthTotals = {};
-  for (const m of monthList) monthTotals[m] = { count: 0, distinct: 0 };
+  for (const m of monthList) {
+    monthTotals[m] = { count: 0, distinct: 0, revenue: 0 };
+  }
   for (const r of rows) {
     const mon = Number(r.mon);
     if (!monthTotals[mon]) continue;
-    monthTotals[mon].count += Number(r.new_rows) || 0;
-    monthTotals[mon].distinct += Number(r.new_distinct) || 0;
+    monthTotals[mon].count += Number(r.cp_rows) || 0;
+    monthTotals[mon].distinct += Number(r.cp_distinct) || 0;
+    monthTotals[mon].revenue += Number(r.cp_revenue) || 0;
   }
-  return { monthTotals };
+
+  const audit = auditRows.map((r) => ({
+    consultation: r.consultation,
+    rows: Number(r.rows_cnt) || 0,
+    revenue: round2(r.revenue),
+    // MySQL's default collation is case-insensitive and ignores trailing
+    // spaces, so mirror that when deciding whether the exact filter caught it.
+    counted:
+      String(r.consultation || "")
+        .trim()
+        .toUpperCase() === CP_CONSULTATION.toUpperCase(),
+  }));
+
+  return { monthTotals, audit };
 }
 
 /* ── Reducers ────────────────────────────────────────────────────────────── */
 
 function emptyMonthTotals(monthList) {
   const m = {};
-  for (const mm of monthList) m[mm] = { count: 0, distinct: 0 };
+  for (const mm of monthList) m[mm] = { count: 0, distinct: 0, revenue: 0 };
   return m;
 }
 
@@ -211,6 +246,7 @@ function mergeMonthTotals(agg, part, monthList) {
   for (const m of monthList) {
     agg[m].count += part.monthTotals[m].count;
     agg[m].distinct += part.monthTotals[m].distinct;
+    agg[m].revenue += part.monthTotals[m].revenue;
   }
 }
 
@@ -219,9 +255,10 @@ function windowTotals(monthTotals, monthList) {
     (a, m) => {
       a.count += monthTotals[m].count;
       a.distinct += monthTotals[m].distinct;
+      a.revenue += monthTotals[m].revenue;
       return a;
     },
-    { count: 0, distinct: 0 },
+    { count: 0, distinct: 0, revenue: 0 },
   );
 }
 
@@ -231,6 +268,7 @@ function monthlyArray(monthTotals, monthList) {
     monthName: MONTH_NAMES[m - 1],
     count: monthTotals[m].count,
     distinct: monthTotals[m].distinct,
+    revenue: round2(monthTotals[m].revenue),
   }));
 }
 
@@ -240,11 +278,12 @@ const zeroMonthly = (monthList) =>
     monthName: MONTH_NAMES[m - 1],
     count: 0,
     distinct: 0,
+    revenue: 0,
   }));
 
 /* ── Main data build ─────────────────────────────────────────────────────── */
 
-async function getMonthwiseNewPatients(locations, options = {}) {
+async function getMonthwiseCP(locations, options = {}) {
   if (!Array.isArray(locations) || locations.length === 0) {
     throw new Error("`locations` must be a non-empty array of branch names.");
   }
@@ -268,6 +307,7 @@ async function getMonthwiseNewPatients(locations, options = {}) {
   };
   const perLoc = {};
   for (const loc of locations) perLoc[loc] = {};
+  const auditRows = [];
 
   async function collect(loc, yr) {
     if (failed.has(loc)) return;
@@ -275,14 +315,16 @@ async function getMonthwiseNewPatients(locations, options = {}) {
       const part = await collectLocationYear(loc, yr, monthList);
       mergeMonthTotals(aggByYear[yr], part, monthList);
       perLoc[loc][yr] = part;
+      part.audit.forEach((a) =>
+        auditRows.push({ location: loc, year: yr, ...a }),
+      );
     } catch (e) {
       failed.add(loc);
       failures.push({ location: loc, error: e?.message || String(e) });
     }
   }
 
-  // One query per (branch, year); parallel across branches. Same shape as the
-  // OPD model, so this is fast — 2 round trips per branch.
+  // Two queries per (branch, year), parallel across branches — fast.
   for (const yr of [year, previousYear]) {
     await Promise.all(locations.map((loc) => collect(loc, yr)));
   }
@@ -290,12 +332,17 @@ async function getMonthwiseNewPatients(locations, options = {}) {
   const aggY = aggByYear[year];
   const aggP = aggByYear[previousYear];
 
-  const shape = (b, yr) => ({ year: yr, count: b.count, distinct: b.distinct });
+  const shape = (b, yr) => ({
+    year: yr,
+    count: b.count,
+    distinct: b.distinct,
+    revenue: round2(b.revenue),
+  });
   const changeOf = (c, p) => ({
     count: { amount: c.count - p.count, pct: pctChange(c.count, p.count) },
-    distinct: {
-      amount: c.distinct - p.distinct,
-      pct: pctChange(c.distinct, p.distinct),
+    revenue: {
+      amount: round2(c.revenue - p.revenue),
+      pct: pctChange(c.revenue, p.revenue),
     },
   });
 
@@ -320,12 +367,9 @@ async function getMonthwiseNewPatients(locations, options = {}) {
       const cur = perLoc[loc][year];
       const prev = perLoc[loc][previousYear];
       if (!cur && !prev) return null;
-      const cWin = cur
-        ? windowTotals(cur.monthTotals, monthList)
-        : { count: 0, distinct: 0 };
-      const pWin = prev
-        ? windowTotals(prev.monthTotals, monthList)
-        : { count: 0, distinct: 0 };
+      const z = { count: 0, distinct: 0, revenue: 0 };
+      const cWin = cur ? windowTotals(cur.monthTotals, monthList) : z;
+      const pWin = prev ? windowTotals(prev.monthTotals, monthList) : z;
       return {
         location: loc,
         current: shape(cWin, year),
@@ -340,20 +384,26 @@ async function getMonthwiseNewPatients(locations, options = {}) {
       };
     })
     .filter(Boolean);
-  // NB: order preserved (not sorted by size), matching the revenue report, so
-  // rows line up with the other workbooks for the same branch list.
+  // Order preserved (not sorted by size) so rows line up with the other reports.
+
+  // Audit: sort so uncounted variants surface at the top, biggest first.
+  auditRows.sort(
+    (a, b) =>
+      Number(a.counted) - Number(b.counted) ||
+      b.rows - a.rows ||
+      a.location.localeCompare(b.location),
+  );
+  const missedRows = auditRows
+    .filter((a) => !a.counted)
+    .reduce((s, a) => s + a.rows, 0);
 
   return {
     generatedAt: new Date().toISOString(),
     definition:
-      `New patient = appointment row with patient_type='New', is_deleted!=1, ` +
-      `executivechk=2` +
-      (REQUIRE_CONFIRM_TIME ? `, confirm_time!='0'` : ``) +
-      `, bucketed by MONTH(appointment_timestamp). Headline figure counts ROWS ` +
-      `(matches Target Comparison); distinct patient_id is reported separately.`,
-    filter: REQUIRE_CONFIRM_TIME
-      ? "(B) DoctorPerformanceModel — confirmed visits only"
-      : "(A) Target Comparison — all booked new appointments",
+      `C+P = patient_itemreceipt rows with consultation = '${CP_CONSULTATION}' ` +
+      `and is_deleted != 1, bucketed by MONTH(item_date). Filter copied from ` +
+      `dashboardModel.proctoscopyCountQuery; the admin dashboard shows this ` +
+      `same figure on the card labelled "C+P".`,
     period: {
       year,
       previousYear,
@@ -368,12 +418,13 @@ async function getMonthwiseNewPatients(locations, options = {}) {
     months,
     totals,
     byLocation,
+    audit: auditRows,
+    missedRows,
   };
 }
 
 /* ── Excel builders ──────────────────────────────────────────────────────── */
 
-// Comparison sheet shared by Month / Location.
 function buildComparisonSheet(report, kind /* 'month' | 'location' */) {
   const { year: Y, previousYear: P, months: ML } = report.period;
   const cfg = {
@@ -381,7 +432,7 @@ function buildComparisonSheet(report, kind /* 'month' | 'location' */) {
       first: "Month",
       rows: report.months,
       label: (r) => r.monthName,
-      title: `Monthly New Patients — ${P} vs ${Y} (${ML})`,
+      title: `Monthly C+P Count — ${P} vs ${Y} (${ML})`,
       totalLabel: `Total (${ML})`,
       w: 16,
     },
@@ -389,7 +440,7 @@ function buildComparisonSheet(report, kind /* 'month' | 'location' */) {
       first: "Location",
       rows: report.byLocation,
       label: (r) => r.location,
-      title: `New Patients by Location — ${P} vs ${Y} (${ML})`,
+      title: `C+P Count by Location — ${P} vs ${Y} (${ML})`,
       totalLabel: "Grand Total",
       w: 22,
     },
@@ -397,14 +448,20 @@ function buildComparisonSheet(report, kind /* 'month' | 'location' */) {
 
   const header = [
     cfg.first,
-    `New Patients ${Y}`,
-    `New Patients ${P}`,
+    `C+P ${Y}`,
+    `C+P ${P}`,
     "Δ",
     "Δ (%)",
     `Distinct Patients ${Y}`,
     `Distinct Patients ${P}`,
+    `Revenue (₹) ${Y}`,
+    `Revenue (₹) ${P}`,
   ];
-  const aoa = [[cfg.title], [report.filter], header];
+  const aoa = [
+    [cfg.title],
+    [`consultation = '${CP_CONSULTATION}' — dashboard "C+P" card`],
+    header,
+  ];
 
   const rowFor = (label, c, p) => [
     label,
@@ -414,21 +471,25 @@ function buildComparisonSheet(report, kind /* 'month' | 'location' */) {
     pctFraction(c.count, p.count) ?? "N/A",
     c.distinct,
     p.distinct,
+    c.revenue,
+    p.revenue,
   ];
 
-  const t = { cc: 0, pc: 0, cd: 0, pd: 0 };
+  const t = { cc: 0, pc: 0, cd: 0, pd: 0, cr: 0, pr: 0 };
   cfg.rows.forEach((r) => {
     aoa.push(rowFor(cfg.label(r), r.current, r.previous));
     t.cc += r.current.count;
     t.pc += r.previous.count;
     t.cd += r.current.distinct;
     t.pd += r.previous.distinct;
+    t.cr += r.current.revenue;
+    t.pr += r.previous.revenue;
   });
   aoa.push(
     rowFor(
       cfg.totalLabel,
-      { count: t.cc, distinct: t.cd },
-      { count: t.pc, distinct: t.pd },
+      { count: t.cc, distinct: t.cd, revenue: round2(t.cr) },
+      { count: t.pc, distinct: t.pd, revenue: round2(t.pr) },
     ),
   );
 
@@ -439,49 +500,48 @@ function buildComparisonSheet(report, kind /* 'month' | 'location' */) {
   ];
   ws["!cols"] = [
     { wch: cfg.w },
-    { wch: 17 },
-    { wch: 17 },
+    { wch: 12 },
+    { wch: 12 },
     { wch: 10 },
     { wch: 10 },
     { wch: 19 },
     { wch: 19 },
+    { wch: 16 },
+    { wch: 16 },
   ];
 
   const fr = 3;
   const lr = 3 + cfg.rows.length;
-  [1, 2, 3, 5, 6].forEach((c) => formatColumn(ws, c, fr, lr, NUM_FMT));
+  [1, 2, 3, 5, 6, 7, 8].forEach((c) => formatColumn(ws, c, fr, lr, NUM_FMT));
   formatColumn(ws, 4, fr, lr, PCT_FMT);
   return ws;
 }
 
-// Location × Month matrix for one year.
 function buildLocationMonthSheet(
   report,
-  metric /* 'count' | 'distinct' */,
+  metric /* 'count' | 'revenue' */,
   which /* 'current' | 'previous' */,
   yr,
 ) {
   const monthNames = report.period.monthNames;
-  const isDistinct = metric === "distinct";
+  const isRev = metric === "revenue";
   const title =
-    `${isDistinct ? "Distinct New Patients" : "New Patients"} ` +
+    `${isRev ? "C+P Revenue (₹)" : "C+P Count"} ` +
     `by Location × Month — ${yr} (${report.period.months})`;
-  const header = ["Location", ...monthNames, "Total"];
+  const header = ["Location", ...monthNames, isRev ? "Total (₹)" : "Total"];
   const aoa = [[title], [], header];
   const key = which === "current" ? "monthlyCurrent" : "monthlyPrevious";
 
   const colSums = new Array(monthNames.length).fill(0);
   let grand = 0;
   report.byLocation.forEach((loc) => {
-    const vals = loc[key].map(
-      (mm) => (isDistinct ? mm.distinct : mm.count) || 0,
-    );
+    const vals = loc[key].map((mm) => (isRev ? mm.revenue : mm.count) || 0);
     const rowTotal = vals.reduce((a, b) => a + b, 0);
     vals.forEach((v, i) => (colSums[i] += v));
     grand += rowTotal;
-    aoa.push([loc.location, ...vals, rowTotal]);
+    aoa.push([loc.location, ...vals, round2(rowTotal)]);
   });
-  aoa.push(["Grand Total", ...colSums, grand]);
+  aoa.push(["Grand Total", ...colSums.map(round2), round2(grand)]);
 
   const ws = xlsx.utils.aoa_to_sheet(aoa);
   ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: header.length - 1 } }];
@@ -493,6 +553,60 @@ function buildLocationMonthSheet(
   const fr = 3;
   const lr = 3 + report.byLocation.length;
   for (let c = 1; c < header.length; c++) formatColumn(ws, c, fr, lr, NUM_FMT);
+  return ws;
+}
+
+// The sheet to actually look at before sending the file.
+function buildAuditSheet(report) {
+  const aoa = [
+    [`Consultation values matching '${CP_AUDIT_PATTERN}' — data-quality check`],
+    [
+      `Rows marked "NO" are NOT in the C+P totals because the filter is an ` +
+        `exact match on '${CP_CONSULTATION}'. If any of those show real volume, ` +
+        `the headline count is understated.`,
+    ],
+    [],
+    [
+      "Location",
+      "Year",
+      "Consultation value",
+      "Rows",
+      "Revenue (₹)",
+      "Counted in C+P?",
+    ],
+  ];
+
+  report.audit.forEach((a) => {
+    aoa.push([
+      a.location,
+      a.year,
+      a.consultation,
+      a.rows,
+      a.revenue,
+      a.counted ? "YES" : "NO",
+    ]);
+  });
+
+  if (!report.audit.length) {
+    aoa.push(["—", "—", "(no matching consultation values found)", 0, 0, "—"]);
+  }
+
+  const ws = xlsx.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } },
+  ];
+  ws["!cols"] = [
+    { wch: 18 },
+    { wch: 8 },
+    { wch: 40 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 16 },
+  ];
+  const fr = 4;
+  const lr = 4 + Math.max(report.audit.length, 1) - 1;
+  [3, 4].forEach((c) => formatColumn(ws, c, fr, lr, NUM_FMT));
   return ws;
 }
 
@@ -513,48 +627,56 @@ function buildWorkbook(report) {
   xlsx.utils.book_append_sheet(
     wb,
     buildLocationMonthSheet(report, "count", "current", year),
-    `New Pat by Loc ${year}`,
+    `C+P by Loc ${year}`,
   );
   xlsx.utils.book_append_sheet(
     wb,
     buildLocationMonthSheet(report, "count", "previous", previousYear),
-    `New Pat by Loc ${previousYear}`,
+    `C+P by Loc ${previousYear}`,
   );
   xlsx.utils.book_append_sheet(
     wb,
-    buildLocationMonthSheet(report, "distinct", "current", year),
-    `Distinct by Loc ${year}`,
+    buildLocationMonthSheet(report, "revenue", "current", year),
+    `C+P Rev by Loc ${year}`,
   );
   xlsx.utils.book_append_sheet(
     wb,
-    buildLocationMonthSheet(report, "distinct", "previous", previousYear),
-    `Distinct by Loc ${previousYear}`,
+    buildLocationMonthSheet(report, "revenue", "previous", previousYear),
+    `C+P Rev by Loc ${previousYear}`,
+  );
+  xlsx.utils.book_append_sheet(
+    wb,
+    buildAuditSheet(report),
+    "Consultation Audit",
   );
 
-  // Definition sheet — this report has a genuine ambiguity, so ship the
-  // definition inside the file rather than relying on the covering mail.
   const notes = [
-    ["New Patients report — definition"],
+    ["C+P report — definition"],
     [],
-    ["Filter applied", report.filter],
     ["Definition", report.definition],
+    ["Dashboard label", `AdminHome.js card "C+P" → dailyOPDReport.procto`],
+    ["Other label", `DailyOPDReport.js / OPDApproval.js column "PROCTOSCOPY"`],
     [],
-    ["SQL WHERE clause", "patient_type = 'New'"],
+    ["SQL WHERE clause", "item_date >= ? AND item_date <= ?"],
+    ["", `AND consultation = '${CP_CONSULTATION}'`],
     ["", "AND is_deleted != 1"],
-    ["", "AND executivechk = 2"],
-    ...(REQUIRE_CONFIRM_TIME ? [["", "AND confirm_time != '0'"]] : []),
-    ["", "bucketed on MONTH(appointment_timestamp)"],
+    ["", "bucketed on MONTH(item_date)"],
     [],
     [
-      "Note",
-      "Headline count is appointment ROWS (COUNT(patient_type)), matching " +
-        "targetComparisonModel. Distinct patient_id is on its own sheets; a " +
-        "large gap on a branch suggests duplicate registrations.",
+      "Counting",
+      "COUNT(consultation) counts itemreceipt ROWS, so a patient billed twice " +
+        "counts twice — this matches the dashboard. Distinct patient_id is " +
+        "shown alongside for reference.",
+    ],
+    [
+      "Caveat",
+      "Exact string match. Variant spellings are excluded — see the " +
+        "'Consultation Audit' sheet before relying on these totals.",
     ],
     ["Generated at", report.generatedAt],
   ];
   const nws = xlsx.utils.aoa_to_sheet(notes);
-  nws["!cols"] = [{ wch: 20 }, { wch: 90 }];
+  nws["!cols"] = [{ wch: 20 }, { wch: 95 }];
   xlsx.utils.book_append_sheet(wb, nws, "Definition");
 
   if (report.locationsFailed && report.locationsFailed.length) {
@@ -577,22 +699,18 @@ function buildWorkbook(report) {
   const num = (n) => Number(n || 0).toLocaleString("en-IN");
 
   console.log("──────────────────────────────────────────────────────────");
-  console.log("Month-wise New Patients Report (temporary runner)");
+  console.log("Month-wise C+P (Proctoscopy) Report (temporary runner)");
   console.log(
     `Window   : ${START_MONTH}–${END_MONTH} | ${YEAR} vs ${PREVIOUS_YEAR}`,
   );
   console.log(`Branches : ${LOCATIONS.join(", ")}`);
   console.log(
-    `Filter   : ${
-      REQUIRE_CONFIRM_TIME
-        ? "(B) confirmed visits only — confirm_time != '0'"
-        : "(A) Target Comparison parity — all booked new appointments"
-    }`,
+    `Filter   : consultation = '${CP_CONSULTATION}', is_deleted != 1`,
   );
   console.log("──────────────────────────────────────────────────────────");
 
   try {
-    const report = await getMonthwiseNewPatients(LOCATIONS, {
+    const report = await getMonthwiseCP(LOCATIONS, {
       year: YEAR,
       previousYear: PREVIOUS_YEAR,
       startMonth: START_MONTH,
@@ -601,7 +719,7 @@ function buildWorkbook(report) {
 
     const wb = buildWorkbook(report);
     const fileName =
-      `Monthwise_NewPatients_${YEAR}_vs_${PREVIOUS_YEAR}_` +
+      `Monthwise_CP_${YEAR}_vs_${PREVIOUS_YEAR}_` +
       `${pad2(START_MONTH)}-${pad2(END_MONTH)}.xlsx`;
     const filePath = path.join(reportsDir, fileName);
     xlsx.writeFile(wb, filePath);
@@ -614,7 +732,7 @@ function buildWorkbook(report) {
       `\nTotals (${report.period.months}) — ${YEAR} vs ${PREVIOUS_YEAR}:`,
     );
     console.log(
-      `   New Patients      : ${num(current.count).padStart(9)}  vs ` +
+      `   C+P count         : ${num(current.count).padStart(9)}  vs ` +
         `${num(previous.count).padStart(9)}   ` +
         `(${change.count.pct === null ? "N/A" : change.count.pct + "%"})`,
     );
@@ -622,22 +740,44 @@ function buildWorkbook(report) {
       `   Distinct patients : ${num(current.distinct).padStart(9)}  vs ` +
         `${num(previous.distinct).padStart(9)}`,
     );
+    console.log(
+      `   Revenue ₹         : ${num(Math.round(current.revenue)).padStart(9)}  vs ` +
+        `${num(Math.round(previous.revenue)).padStart(9)}`,
+    );
 
-    const gap = current.count - current.distinct;
-    if (gap > 0) {
-      console.log(
-        `   ⓘ ${num(gap)} repeat 'New' rows in ${YEAR} ` +
-          `(${((gap / current.count) * 100).toFixed(1)}% of the headline count).`,
-      );
-    }
-
-    console.log("\nMonth-wise new patients:");
+    console.log("\nMonth-wise C+P:");
     report.months.forEach((m) => {
       console.log(
         `   ${m.monthName.padEnd(10)} ${num(m.current.count).padStart(8)}` +
           `  vs ${num(m.previous.count).padStart(8)}`,
       );
     });
+
+    // The check worth surfacing loudly — a silent exact-match miss is the most
+    // likely way this report is wrong.
+    if (report.missedRows > 0) {
+      console.warn(
+        `\n⚠️  DATA-QUALITY WARNING: ${num(report.missedRows)} row(s) matched ` +
+          `'${CP_AUDIT_PATTERN}' but NOT the exact filter '${CP_CONSULTATION}', ` +
+          `so they are EXCLUDED from the counts above:`,
+      );
+      report.audit
+        .filter((a) => !a.counted)
+        .slice(0, 15)
+        .forEach((a) =>
+          console.warn(
+            `   • ${a.location} ${a.year}: "${a.consultation}" — ${num(a.rows)} rows`,
+          ),
+        );
+      console.warn(
+        `   → Review the 'Consultation Audit' sheet and decide whether to ` +
+          `widen CP_CONSULTATION before circulating this file.`,
+      );
+    } else {
+      console.log(
+        `\n✓ No near-miss consultation spellings found — exact filter looks clean.`,
+      );
+    }
 
     if (report.locationsFailed?.length) {
       console.warn("\n⚠️  Skipped branches (see 'Skipped Locations' sheet):");
@@ -649,7 +789,7 @@ function buildWorkbook(report) {
     console.log(`\nDone in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     process.exit(0);
   } catch (err) {
-    console.error("\n❌ New patients report failed:", err?.message || err);
+    console.error("\n❌ C+P report failed:", err?.message || err);
     console.error(err?.stack || "");
     process.exit(1);
   }

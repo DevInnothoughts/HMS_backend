@@ -2,9 +2,9 @@ const crypto = require("crypto");
 
 // --- Worldline UAT config ---
 const CONFIG = {
-  url: "https://bouat.mrlpay.com/pcpos4/CancelTransactionRequest.php?source=629",
-  aesKey: "X5mUl3J1jneCd0adISoHWDTj7U8Rnhvd", // 32 chars -> AES-256
-  aesIv: "1111111245683783", // 16 chars
+  url: "https://lb.mrlpay.com/pcpos4/CancelTransactionRequest.php?source=988",
+  aesKey: "bTrpIKF4VDZf1MwUx1N362L0aeyzSUu2", // 32 chars -> AES-256
+  aesIv: "czAJaZIH3DTgbz0w", // 16 chars
 };
 
 // Your Initiate call works by POSTing the bare cipher string, so Cancel does
@@ -42,15 +42,15 @@ function decrypt(cipherB64) {
 function buildCancelPayload(p) {
   return {
     tid: p.tid,
-    amount: p.amount !== undefined ? String(p.amount) : "",
-    organization_code: p.organizationCode || "Retail",
-    invoiceNumber: p.invoiceNumber || "",
-    rrn: p.rrn || "",
-    type: p.type || "SALE",
-    cb_amt: p.cbAmt || "",
-    app_code: p.appCode || "",
-    tokenisedValue: p.tokenisedValue || "",
-    actionId: p.actionId || "1",
+    // amount: p.amount !== undefined ? String(p.amount) : "",
+    // organization_code: p.organizationCode || "Retail",
+    // invoiceNumber: p.invoiceNumber || "",
+    // rrn: p.rrn || "",
+    // type: p.type || "SALE",
+    // cb_amt: p.cbAmt || "",
+    // app_code: p.appCode || "",
+    // tokenisedValue: p.tokenisedValue || "",
+    // actionId: p.actionId || "1",
     urn: p.urn ? String(p.urn) : "",
     request_urn: p.requestUrn || "",
   };
@@ -149,8 +149,8 @@ module.exports = {
 // --- Run directly:  node cancel-transaction.js ---
 if (require.main === module) {
   cancelTransaction({
-    tid: "2532415U",
-    urn: "75124", // the urn returned by initiateTransaction
+    tid: "65136209",
+    urn: "14136800", // the urn returned by initiateTransaction
     requestUrn: "HMS-BILL-4568", // fallback if Initiate timed out with no urn
   })
     .then((response) => console.log("\n=== RESULT OBJECT ===\n", response))

@@ -45,6 +45,11 @@ const fs = require("fs");
 const path = require("path");
 const { sendMail } = require("../services/mailer");
 const { resolveNotification } = require("../services/ticketNotifications");
+const { sendTemplate } = require("../services/whatsapp");
+const {
+  addWorkingHours,
+  workingMinutesBetween,
+} = require("../services/businessHours");
 
 // Key for the ticketing database in the shared connection factory.
 // databaseUtils.js maps this to createPool("serviceTicketing"). Same convention
@@ -61,6 +66,29 @@ const CONFIG = {
   DEFAULT_SLA_HOURS: { Critical: 8, Medium: 72, Low: 168 },
   MIN_SLA_HOURS: 1,
   MAX_SLA_HOURS: 720, // 30 days
+
+  // ── Cluster Head approval deadline ───────────────────────────────────────
+  // A ticket at `Open` waits on one person, and nothing downstream moves until
+  // they act. They get this many WORKING hours (Mon–Sat 10:00–19:00 — see
+  // services/businessHours.js) from the moment the branch raised it, after
+  // which a WhatsApp reminder goes out. Working hours on purpose: a ticket
+  // raised at 18:00 on Saturday is due at 12:00 on Monday, and a reminder that
+  // lands at 21:00 on Sunday is one people learn to swipe away.
+  APPROVAL_DEADLINE_HOURS: 3,
+  APPROVAL_REMINDER_TEMPLATE:
+    process.env.TICKETING_WA_APPROVAL_TEMPLATE || "ticket_approval_reminder",
+
+  // ── The unrouted department ──────────────────────────────────────────────
+  // Not a real department and deliberately NOT a row in ticket_department: a
+  // row would put it in the Cluster Head's approval picker and the Department
+  // Head's re-assign picker — the two places a REAL department is being chosen
+  // — and would let the admin panel onboard a head into it. It is the branch
+  // saying "I don't know whose this is", and the Cluster Head resolves it at
+  // approval. See denyReason in the `approve` case below.
+  UNASSIGNED_DEPARTMENT: "N/A",
+  // With no department there is no issue list to choose from, so an unrouted
+  // ticket is always Other and the description carries the detail.
+  UNROUTED_ISSUE_TYPE: "Other",
 
   TICKET_REF_PREFIX: "HHC-",
   TICKET_REF_BASE: 1000, // HHC-1001, HHC-1002, … (matches the approved mockups)
@@ -145,9 +173,20 @@ const STATUS = {
   OPEN: "Open",
   SENT_BACK: "Sent Back",
   APPROVED: "Approved",
+  // Restored. A ticket with a name on it but no work started yet — distinct
+  // from Approved (with the department, nobody holding it) because "who has
+  // this" is the question a head opens the queue to answer.
+  ASSIGNED: "Assigned",
   IN_PROGRESS: "In Progress",
-  WAITING_VENDOR: "Waiting for Vendor",
-  // The local-fix path (Operations). The branch fixes it themselves and the
+  // Restored. The user says the work is done; the head has not agreed yet.
+  // Deliberately NOT Resolved: resolving is the department's word to the
+  // branch, and it should not be a junior's to give.
+  PENDING_APPROVAL: "Pending Approval",
+  // Renamed from "Waiting for Vendor". Blocked is blocked — whether it is a
+  // vendor, a part, a landlord or another department, the person waiting on it
+  // needs the same word. The specific reason belongs in the remark, where it
+  // can actually say which vendor.
+  ON_HOLD: "On Hold", // The local-fix path (Operations). The branch fixes it themselves and the
   // Cluster Head signs it off — no department ever holds it.
   WITH_BRANCH: "With Branch",
   BRANCH_FIXED: "Branch Fixed",
@@ -182,10 +221,14 @@ const DISPLAY_STATUSES = Object.values(DISPLAY_STATUS);
 const DISPLAY_GROUPS = {
   [DISPLAY_STATUS.OPEN]: [STATUS.OPEN, STATUS.APPROVED, STATUS.REOPENED],
   [DISPLAY_STATUS.IN_PROGRESS]: [
+    // Assigned reads as in progress to the BRANCH: somebody has picked it up,
+    // which is what they wanted to know. Pending Approval likewise — the work
+    // is claimed done but the department has not said so, and telling a branch
+    // "resolved" before the department agrees is how a ticket gets reopened.
+    STATUS.ASSIGNED,
     STATUS.IN_PROGRESS,
-    STATUS.WAITING_VENDOR,
-    // Being fixed at the branch is still being fixed. A branch partner should
-    // not have to learn a new word for it.
+    STATUS.ON_HOLD,
+    STATUS.PENDING_APPROVAL,
     STATUS.WITH_BRANCH,
     STATUS.BRANCH_FIXED,
   ],
@@ -214,12 +257,30 @@ function displayStatusOf(status, overdue) {
   return DISPLAY_STATUS.OPEN;
 }
 
-// Terminal-ish buckets. `Sent Back` is deliberately in neither DONE_STATES nor
-// the open set: it never became work, so counting it as open would nag people
-// forever and counting it as closed would flatter the closure rate. It is
-// excluded from the denominator instead.
+// A ticket is OPEN until it is CLOSED. Not until it was resolved, not until it
+// was sent back — closed.
+//
+// This constant is the fix for a tile that led to an empty list: the dashboard
+// counted "not Closed, Resolved or Sent Back" while the list showed "Open,
+// Approved or Reopened, and not late". Both now read THIS, and the only way to
+// change what open means is to change it here.
+//
+// Resolved counts as open because a ticket the department has fixed but nobody
+// has closed is still someone's to finish. Sent Back counts because, whatever
+// it means to the department, it is an unresolved request sitting on a branch.
+const OPEN_STATES = ALL_STATUSES.filter((s) => s !== STATUS.CLOSED);
+
+// Kept for closurePct and the Closed tile. `Sent Back` stays out of both: it
+// never became work, so counting it as closed would flatter the closure rate.
 const DONE_STATES = [STATUS.CLOSED, STATUS.RESOLVED];
-const NOT_OPEN_STATES = [STATUS.CLOSED, STATUS.RESOLVED, STATUS.SENT_BACK];
+
+// The ONE definition of late. It lived in three places — TICKET_SELECT's
+// is_overdue, the dashboard's overdueCount, and listTickets' local LATE — and
+// they disagreed about Resolved, so the Overdue tile counted tickets the
+// Overdue filter then refused to show. Same class of bug as the Open tile.
+// Resolved is excluded to match displayStatusOf: a resolved ticket delivered
+// late reads as resolved, not overdue.
+const LATE_SQL = `t.status NOT IN ('Closed','Sent Back','Resolved') AND t.due_at < NOW()`;
 
 // Statuses a Department Head may see: anything past Cluster Head approval that
 // is actually theirs. The local-fix states are excluded — those tickets never
@@ -237,20 +298,29 @@ const DEPT_VISIBLE_STATES = ALL_STATUSES.filter(
 // `roles` who may fire it, `raiserOrBranchPartner` restricts it to whoever
 // raised the ticket or a Partner accountable for that branch.
 //
-// PDF §2 — a department is ONE head. Tickets are not assigned inside the app
-// (that happens off-system), so there is no assignee, no separate "mark fixed"
-// by a junior, and no sign-off by a head on someone else's work. The head who
-// receives a ticket works it, resolves it and closes it. That removes `assign`,
-// `fix`, `deptApprove` and `sendBack` outright.
+// A department is a head AND a team. The head receives a ticket and either
+// works it themselves (resolve) or hands it to someone (assign). The person
+// holding it moves it along and marks it fixed; the head signs that off or
+// sends it back. `assign`, `fix`, `deptApprove` and `sendBack` are that flow.
+//
+// The head can still resolve directly, so assigning is a choice rather than a
+// mandatory extra hop — a one-person department should not have to assign
+// tickets to itself.
 //
 // PDF §5 — `revert` and `route` are replaced by `reassign` and `forward`, which
 // move the ticket directly instead of bouncing it back through the Cluster Head.
 const DEPT_ACTIVE = [
   STATUS.APPROVED,
+  STATUS.ASSIGNED,
   STATUS.IN_PROGRESS,
-  STATUS.WAITING_VENDOR,
+  STATUS.ON_HOLD,
   STATUS.REOPENED,
 ];
+
+// What an assigned person may act on. Excludes Approved (nothing assigned yet)
+// and Pending Approval (they have already handed it up — letting them keep
+// editing it after submitting for sign-off makes the sign-off meaningless).
+const USER_ACTIVE = [STATUS.ASSIGNED, STATUS.IN_PROGRESS, STATUS.ON_HOLD];
 
 const TRANSITIONS = {
   approve: {
@@ -300,20 +370,23 @@ const TRANSITIONS = {
     label: "Mark resolved",
     remarkRequired: true,
   },
-  // Resolved is reached by BOTH paths, but only a locally-fixed ticket may be
-  // closed by a Cluster Head — the department path keeps its own `close`, owned
-  // by the department head. Gated on ticket.local_fix in denyReason.
+  // Resolved is reached by BOTH paths and the branch closes either one. The two
+  // actions stay separate only so the trail can say which route the ticket
+  // took; `local_fix` decides which is offered, in denyReason.
   closeLocal: {
     from: [STATUS.RESOLVED],
     to: STATUS.CLOSED,
-    roles: [ROLES.CLUSTER_HEAD, ROLES.SUPER_ADMIN],
+    roles: [ROLES.PARTNER, ROLES.SUPER_ADMIN],
+    raiserOrBranchPartner: true,
     label: "Close ticket",
   },
   progress: {
     from: DEPT_ACTIVE,
-    to: null, // caller picks: In Progress | Waiting for Vendor
-    toOneOf: [STATUS.IN_PROGRESS, STATUS.WAITING_VENDOR],
-    roles: [ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    to: null, // set from the body — see toOneOf
+    // The person actually holding the ticket updates its state. denyReason
+    // pins a DEPT_USER to tickets assigned to them.
+    roles: [ROLES.DEPT_USER, ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    toOneOf: [STATUS.IN_PROGRESS, STATUS.ON_HOLD],
     label: "Update progress",
   },
   // PDF §5 — wrong department. The ticket moves, and it leaves this head's
@@ -344,10 +417,19 @@ const TRANSITIONS = {
     label: "Mark resolved",
     remarkRequired: true,
   },
+  // The department RESOLVES — a claim the work is done. The branch CLOSES —
+  // the verification that it landed. Only the person who felt the problem can
+  // say whether it went away, and they are already sitting at this status
+  // holding `reopen`; this is the other half of that question.
+  //
+  // `raiserOrBranchPartner`, matching reopen: any Partner accountable for the
+  // branch, not only the individual who raised it. Otherwise a ticket raised by
+  // someone who has since left can never be closed by anyone.
   close: {
     from: [STATUS.RESOLVED],
     to: STATUS.CLOSED,
-    roles: [ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    roles: [ROLES.PARTNER, ROLES.SUPER_ADMIN],
+    raiserOrBranchPartner: true,
     label: "Close ticket",
   },
   // The head closes without the branch's say-so now, so the branch keeps a way
@@ -367,6 +449,44 @@ const TRANSITIONS = {
     label: "Comment",
     remarkRequired: true,
   },
+  // ── Assignment ───────────────────────────────────────────────────────────
+  // Also the REASSIGN path: legal from every active state, so a head can move
+  // a ticket off someone who is stuck or away without bouncing it backwards.
+  // Requires `assigneeMobile`, validated against the roster in transitionTicket
+  // — a mobile from the request body is never trusted as a team member.
+  assign: {
+    from: DEPT_ACTIVE.concat([STATUS.PENDING_APPROVAL]),
+    to: STATUS.ASSIGNED,
+    roles: [ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    label: "Assign to someone",
+  },
+  // The assigned person says the work is done. Remark required: it is the only
+  // account of what was actually done, and the head signing off needs something
+  // to sign off ON.
+  fix: {
+    from: USER_ACTIVE,
+    to: STATUS.PENDING_APPROVAL,
+    roles: [ROLES.DEPT_USER, ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    label: "Mark as fixed",
+    remarkRequired: true,
+  },
+  // The head agrees, and only now does the branch hear "resolved".
+  deptApprove: {
+    from: [STATUS.PENDING_APPROVAL],
+    to: STATUS.RESOLVED,
+    roles: [ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    label: "Approve the fix",
+    remarkRequired: true,
+  },
+  // The head does not agree. Back to the person who submitted it, with the
+  // reason — a rejection with no reason just gets resubmitted unchanged.
+  sendBack: {
+    from: [STATUS.PENDING_APPROVAL],
+    to: STATUS.ASSIGNED,
+    roles: [ROLES.DEPT_HEAD, ROLES.SUPER_ADMIN],
+    label: "Send back for rework",
+    remarkRequired: true,
+  },
 };
 
 // Which activity row an action writes.
@@ -379,7 +499,12 @@ const ACTION_LOG = {
   progress: "PROGRESS",
   fix: "FIXED",
   deptApprove: "DEPT_APPROVED",
-  sendBack: "SENT_BACK",
+  // NOT "SENT_BACK". That verb is already reconsider's — a Cluster Head
+  // returning a REQUEST to the branch — and it drives an email to the raiser.
+  // This is a head returning a FIX to their own team member: internal, and the
+  // branch must not hear about it. Sharing the verb emailed the branch that
+  // their ticket had been rejected every time a head asked for a rework.
+  sendBack: "REWORK",
   close: "CLOSED",
   reopen: "REOPENED",
   comment: "COMMENT",
@@ -692,12 +817,16 @@ function visibilityScope(actor) {
         params: [actor.department, ...DEPT_VISIBLE_STATES],
       };
 
-    // PDF §2 — "Only 1 head can see tickets, and resolve." Nothing can be
-    // assigned to a Department User any more, so a queue would only ever show
-    // them work they cannot touch. They remain a RECRUITMENT role: that module
-    // reads the same ticket_user roster and is unaffected by this.
+    // What is on their desk, and nothing else. NOT the department queue: a
+    // user seeing work assigned to a colleague can act on none of it, and a
+    // list where most rows do nothing teaches people to stop reading the list.
     case ROLES.DEPT_USER:
-      return { sql: "1 = 0", params: [] };
+      return {
+        sql: `(t.assignee_mobile = ? AND t.status IN (${placeholders(
+          DEPT_VISIBLE_STATES,
+        )}))`,
+        params: [actor.mobile, ...DEPT_VISIBLE_STATES],
+      };
 
     default:
       return { sql: "1 = 0", params: [] };
@@ -746,18 +875,33 @@ function denyReason(action, ticket, actor) {
   if (action === "sendToBranch" && !Number(ticket.allows_local_fix)) {
     return `${ticket.department} tickets are handled by the department, not the branch.`;
   }
-  // Closing a department-path ticket stays with the department head.
+  // The two close actions differ only by which route the ticket took, so
+  // `local_fix` picks exactly one of them. Without BOTH halves, actionsFor
+  // returns both and the branch is offered two identical Close buttons.
   if (action === "closeLocal" && !Number(ticket.local_fix)) {
-    return "This ticket was handled by a department — its head closes it.";
+    return "This ticket went through a department — close it from there.";
   }
-  // Only heads reach a department queue now, so the DEPT_USER half of this
-  // guard has gone with them.
+  if (action === "close" && Number(ticket.local_fix)) {
+    return "This ticket was fixed at the branch — close it from there.";
+  }
+  // Both department roles are pinned to their own department.
   if (
-    actor.role === ROLES.DEPT_HEAD &&
+    (actor.role === ROLES.DEPT_HEAD || actor.role === ROLES.DEPT_USER) &&
     actor.department &&
     ticket.department !== actor.department
   ) {
     return `This ticket sits with ${ticket.department}, not ${actor.department}.`;
+  }
+
+  // A Department User acts on THEIR tickets only. The visibility scope already
+  // hides everyone else's, but scope and permission are separate concerns —
+  // relying on "they cannot see it" as the permission check is how a direct API
+  // call gets to do what the UI never offered.
+  if (
+    actor.role === ROLES.DEPT_USER &&
+    ticket.assignee_mobile !== actor.mobile
+  ) {
+    return "This ticket is not assigned to you.";
   }
 
   // ── Then ownership ───────────────────────────────────────────────────────
@@ -799,8 +943,21 @@ function mapTicket(r, actor) {
     // The detailed workflow state. The app shows `displayStatus` instead — see
     // DISPLAY_STATUS — but this stays available for the timeline and debugging.
     status: r.status,
-    // No assignee under the new flow: the department's head owns it.
-    owner: r.owner_label || `${r.department} Team`,
+    // No assignee under the new flow: the department's head owns it. An
+    // unrouted ticket has no head, and "N/A Team" would read like a real one.
+    // Order matters: the unrouted check stays FIRST. An N/A ticket has not been
+    // approved yet, so it cannot have an assignee — and "Awaiting routing" is
+    // the more useful thing to say about it than any department name.
+    owner:
+      r.department === CONFIG.UNASSIGNED_DEPARTMENT
+        ? "Awaiting routing by the Cluster Head"
+        : r.assignee_name || r.owner_label || `${r.department} Team`,
+    assigneeMobile: r.assignee_mobile || null,
+    assigneeName: r.assignee_name || null,
+    assignedAt: r.assigned_at || null,
+    // Read by TicketDetail, which must not pre-fill the approval picker with a
+    // value that is not in it.
+    departmentUnassigned: r.department === CONFIG.UNASSIGNED_DEPARTMENT,
     age: Number(r.age_days) || 0,
     overdue: !!Number(r.is_overdue),
     // The one of six words a person actually sees.
@@ -831,11 +988,15 @@ function mapTicket(r, actor) {
         raised_by_mobile: r.raised_by_mobile,
         department: r.department,
         branch_name: r.branch_name,
-        // Both gates in denyReason read these. Omitting them doesn't cause an
-        // error — it makes every gate fail closed and silently removes the
-        // action from every ticket, which is far harder to spot.
+        // Every gate in denyReason reads from THIS object, not from the row —
+        // so a field missing here is not an error, it silently removes the
+        // action from every ticket. Adding a guard to denyReason means adding
+        // its field here, in the same commit.
         allows_local_fix: r.allows_local_fix,
         local_fix: r.local_fix,
+        // The Department User gate. Absent, it read undefined !== actor.mobile
+        // and denied every action to every assignee.
+        assignee_mobile: r.assignee_mobile,
       },
       actor,
     );
@@ -848,9 +1009,23 @@ const TICKET_SELECT = `
           d.owner_label,
          d.allows_local_fix,
          TIMESTAMPDIFF(DAY, t.raised_at, NOW()) AS age_days,
-         (t.status NOT IN ('Closed', 'Sent Back') AND t.due_at < NOW()) AS is_overdue
+          (${LATE_SQL}) AS is_overdue,
+         -- Who to email at the two department steps. Both LEFT JOINs, so a
+         -- ticket with nobody assigned, or in a department with no head on the
+         -- roster, still comes back — it just has a null address, which
+         -- resolveNotification already drops.
+         au.email AS assignee_email,
+         hu.email AS dept_head_email
     FROM ticket t
     LEFT JOIN ticket_department d ON d.name = t.department
+    LEFT JOIN ticket_user au
+           ON au.mobile = t.assignee_mobile
+          AND au.is_deleted = 0
+    LEFT JOIN ticket_user hu
+           ON hu.department = t.department
+          AND hu.ticket_role = 'Department Head'
+          AND hu.is_deleted = 0
+          AND hu.is_active = 1
 `;
 
 // ─── META ────────────────────────────────────────────────────────────────────
@@ -876,7 +1051,11 @@ async function getMeta() {
   }
 
   return {
+    // The REAL departments only. N/A is sent separately, below, so it can be
+    // appended to the one dropdown that should offer it (Raise Ticket) without
+    // leaking into the approval and re-assign pickers.
     departments: departments.map((d) => d.name),
+    unassignedDepartment: CONFIG.UNASSIGNED_DEPARTMENT,
     departmentOwners: Object.fromEntries(
       departments.map((d) => [d.name, d.owner_label]),
     ),
@@ -924,13 +1103,11 @@ async function listTickets(req) {
     // into the underlying states. The buckets are mutually exclusive and match
     // displayStatusOf() exactly — a ticket the list calls "In progress" must
     // never read "Overdue" on its own card.
-    const LATE =
-      "t.status NOT IN ('Closed','Sent Back','Resolved') AND t.due_at < NOW()";
-    const NOT_LATE = `NOT (${LATE})`;
+    const NOT_LATE = `NOT (${LATE_SQL})`;
     const G = DISPLAY_GROUPS;
 
     if (status === DISPLAY_STATUS.OVERDUE) {
-      where.push(LATE);
+      where.push(LATE_SQL);
     } else if (status === DISPLAY_STATUS.SENT_BACK) {
       where.push("t.status = ?");
       params.push(STATUS.SENT_BACK);
@@ -946,10 +1123,12 @@ async function listTickets(req) {
       );
       params.push(...G[DISPLAY_STATUS.IN_PROGRESS]);
     } else if (status === DISPLAY_STATUS.OPEN) {
-      where.push(
-        `t.status IN (${placeholders(G[DISPLAY_STATUS.OPEN])}) AND ${NOT_LATE}`,
-      );
-      params.push(...G[DISPLAY_STATUS.OPEN]);
+      // NOT the display group, and NOT intersected with NOT_LATE. Open here is
+      // the dashboard's open — everything still live — because this is where
+      // the Open tile lands. An overdue ticket and an in-progress one are both
+      // open; excluding them is what made the tile lead nowhere.
+      where.push(`t.status IN (${placeholders(OPEN_STATES)})`);
+      params.push(...OPEN_STATES);
     } else if (ALL_STATUSES.includes(status)) {
       // Still honoured, so a dashboard tile naming a precise workflow state
       // keeps working.
@@ -959,13 +1138,17 @@ async function listTickets(req) {
   }
 
   // PDF §3 — the list is a work queue, not an archive. With no status filter in
-  // play, finished tickets are hidden. Filtering explicitly to Closed or Sent
-  // back still reaches them, so nothing becomes unreachable — and the
-  // dashboard's Closed tile, which sends an explicit status, keeps working.
+  // play, CLOSED tickets are hidden. Filtering explicitly to Closed still
+  // reaches them, so nothing becomes unreachable.
+  //
+  // Sent Back is no longer hidden here. It is not closed, so by the rule above
+  // it is open — and it is the one status a branch most needs to see, because
+  // it is the one waiting on them. Hiding it by default meant the person who
+  // had to act on it was the person who could not find it.
   const noStatusChosen = !statusExact && (!status || status === "All");
   if (noStatusChosen && String(src.includeFinished) !== "true") {
-    where.push(`t.status NOT IN (?, ?)`);
-    params.push(STATUS.CLOSED, STATUS.SENT_BACK);
+    where.push(`t.status <> ?`);
+    params.push(STATUS.CLOSED);
   }
 
   if (priority && PRIORITIES.includes(priority)) {
@@ -1142,9 +1325,16 @@ async function createTicket(req) {
 
   const branch = str(body.center || body.branch || body.location);
   const department = str(body.department);
-  const issueType = str(body.issueType);
   const priority = str(body.priority) || "Medium";
   const description = str(body.description);
+
+  // N/A means the branch could not tell whose problem this is. The issue type
+  // follows from that — there is no list to pick from when the department is
+  // unknown — so it is forced here rather than trusted from the body. The form
+  // locks the field too, but a rule only enforced in the UI holds until someone
+  // posts to the API directly.
+  const unrouted = department === CONFIG.UNASSIGNED_DEPARTMENT;
+  const issueType = unrouted ? CONFIG.UNROUTED_ISSUE_TYPE : str(body.issueType);
 
   if (!branch) throw badRequest("Select the center this issue belongs to.");
   if (!department) throw badRequest("Select a department.");
@@ -1153,11 +1343,23 @@ async function createTicket(req) {
     throw badRequest(`Priority must be one of: ${PRIORITIES.join(", ")}.`);
   if (!description) throw badRequest("Describe the issue before submitting.");
 
-  const known = await run(
-    `SELECT name FROM ticket_department WHERE name = ? AND is_active = 1`,
-    [department],
-  );
-  if (!known.length) throw badRequest(`"${department}" is not a department.`);
+  // A ticket that skips the approval step has nobody to route it, so it has to
+  // arrive routed. Only a SuperAdmin self-approves, and they know the list.
+  if (unrouted && actor.role === ROLES.SUPER_ADMIN) {
+    throw badRequest(
+      "Your ticket is approved as you raise it, so it needs a real department — " +
+        "there is no approval step to route it at.",
+    );
+  }
+
+  // N/A is a constant, not a row, so it has nothing to look up.
+  if (!unrouted) {
+    const known = await run(
+      `SELECT name FROM ticket_department WHERE name = ? AND is_active = 1`,
+      [department],
+    );
+    if (!known.length) throw badRequest(`"${department}" is not a department.`);
+  }
 
   const now = new Date();
   const raisedAt = toSqlDateTime(now);
@@ -1175,6 +1377,14 @@ async function createTicket(req) {
   const dueAt = selfApproved ? toSqlDateTime(dueFrom(slaHours, now)) : null;
   const departmentSince = selfApproved ? raisedAt : null;
 
+  // The Cluster Head's own clock, separate from the resolution SLA — that one
+  // does not start until they approve, so without this the approval step is the
+  // one part of the journey nothing measures. A self-approved ticket never
+  // waits on an approval, so it has no approval deadline at all.
+  const approvalDueAt = selfApproved
+    ? null
+    : addWorkingHours(raisedAt, CONFIG.APPROVAL_DEADLINE_HOURS);
+
   const attachment = body.attachment || null;
 
   return withTransaction(async (q) => {
@@ -1182,10 +1392,10 @@ async function createTicket(req) {
       `INSERT INTO ticket
          (branch_name, department, issue_type, priority, description, status,
           raised_by_mobile, raised_by_name, raised_by_role, raised_at,
-          raised_by_email, cluster_head_email,
+          raised_by_email, cluster_head_email, cluster_head_mobile,
           approved_by_mobile, approved_by_name, approved_at,
-          sla_hours, due_at, department_since)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sla_hours, due_at, approval_due_at, department_since)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         branch,
         department,
@@ -1200,8 +1410,11 @@ async function createTicket(req) {
         actor.role === ROLES.PARTNER ? "Partner" : "SuperAdmin",
         raisedAt,
         // Emails for the non-roster people, passed by the app.
+        // Contact details for the non-roster people, passed by the app — the
+        // backend never touches Firestore, which is where these two live.
         str(body.raisedByEmail) || null,
         str(body.clusterHeadEmail) || null,
+        str(body.clusterHeadMobile) || null,
         selfApproved ? actor.mobile : null,
         selfApproved ? actor.name : null,
         selfApproved ? raisedAt : null,
@@ -1209,6 +1422,7 @@ async function createTicket(req) {
         // they approve.
         slaHours,
         dueAt,
+        approvalDueAt,
         departmentSince,
       ],
     );
@@ -1380,6 +1594,23 @@ async function transitionTicket(req, action) {
         // The last cheap moment to correct a wrong department, and — PDF §4 and
         // §7 — where the final priority and the resolution time are set.
         const dept = str(body.department);
+
+        // A ticket raised as N/A has no department yet. Approving it as-is
+        // would file it under a department no head owns, where it would sit
+        // until someone noticed by accident — so the Cluster Head routes it or
+        // the approval does not happen.
+        if (ticket.department === CONFIG.UNASSIGNED_DEPARTMENT && !dept) {
+          throw badRequest(
+            "This ticket was raised without a department. Pick the one it " +
+              "belongs to before approving.",
+          );
+        }
+        if (dept === CONFIG.UNASSIGNED_DEPARTMENT) {
+          throw badRequest(
+            `${CONFIG.UNASSIGNED_DEPARTMENT} is not a department — pick the one that owns this.`,
+          );
+        }
+
         if (dept && dept !== ticket.department) {
           const ok = await q(
             `SELECT name FROM ticket_department WHERE name = ? AND is_active = 1`,
@@ -1387,7 +1618,13 @@ async function transitionTicket(req, action) {
           );
           if (!ok.length) throw badRequest(`"${dept}" is not a department.`);
           push("department = ?", dept);
-          deptMoved = `Moved from ${ticket.department} to ${dept}`;
+          // "Moved from N/A to IT" reads like a mistake was corrected. It was
+          // not — the branch said they did not know, and this is the routing
+          // decision they were waiting on. The trail should say so.
+          deptMoved =
+            ticket.department === CONFIG.UNASSIGNED_DEPARTMENT
+              ? `Routed to ${dept} (raised without a department)`
+              : `Moved from ${ticket.department} to ${dept}`;
         }
 
         // PDF §7 — the branch picks a priority, the Cluster Head confirms or
@@ -1559,6 +1796,46 @@ async function transitionTicket(req, action) {
         );
         break;
 
+      case "assign": {
+        const assigneeMobile = str(body.assigneeMobile);
+        if (!assigneeMobile) throw badRequest("Choose who to assign this to.");
+
+        // Validated against the roster, in the TICKET's department — not the
+        // actor's and not the body's. This is what stops a crafted request
+        // assigning work to someone in another department, or to a mobile that
+        // is on no roster at all and therefore can never open it.
+        const who = await q(
+          `SELECT name FROM ticket_user
+            WHERE mobile = ? AND department = ?
+              AND is_active = 1 AND is_deleted = 0
+            LIMIT 1`,
+          [assigneeMobile, ticket.department],
+        );
+        if (!who.length) {
+          throw badRequest("That person is not on this department's team.");
+        }
+
+        push("assignee_mobile = ?", assigneeMobile);
+        push("assignee_name = ?", who[0].name);
+        push("assigned_at = ?", nowSql);
+        break;
+      }
+      case "fix":
+        // Nothing beyond the status and the remark — the remark IS the record
+        // of what was done, and it is already written to ticket_activity.
+        break;
+      case "deptApprove":
+        // Reached Resolved via the team rather than the head's own hands, but
+        // it is the same milestone, so it writes the same columns. Anything
+        // else and the SLA and dashboard would have to learn about two kinds of
+        // resolved.
+        push("resolved_by_mobile = ?", actor.mobile);
+        push("resolved_by_name = ?", actor.name);
+        push("resolved_at = ?", nowSql);
+        break;
+      case "sendBack":
+        // The assignee stays put: it goes back to the same person to redo.
+        break;
       default:
         break;
     }
@@ -1630,19 +1907,30 @@ async function getDashboard(req) {
   const [totals] = await run(
     `SELECT
        COUNT(*) AS total,
-       SUM(t.status NOT IN (${placeholders(NOT_OPEN_STATES)})) AS openCount,
-       SUM(t.status NOT IN (${placeholders(NOT_OPEN_STATES)}) AND t.priority = 'Critical') AS criticalCount,
-       SUM(t.status NOT IN ('Closed', 'Sent Back') AND t.due_at < NOW()) AS overdueCount,
+       SUM(t.status IN (${placeholders(OPEN_STATES)})) AS openCount,
+       SUM(t.status IN (${placeholders(OPEN_STATES)}) AND t.priority = 'Critical') AS criticalCount,
+       SUM(${LATE_SQL}) AS overdueCount,
        SUM(t.status IN (${placeholders(DONE_STATES)})) AS closedCount,
        SUM(t.status = 'Sent Back') AS rejectedCount,
-       SUM(t.status NOT IN ('Closed', 'Sent Back') AND t.raised_at < DATE_SUB(NOW(), INTERVAL 1 MONTH)) AS open1m,
-       SUM(t.status NOT IN ('Closed', 'Sent Back') AND t.raised_at < DATE_SUB(NOW(), INTERVAL 3 MONTH)) AS open3m,
-       SUM(t.status NOT IN ('Closed', 'Sent Back') AND t.raised_at < DATE_SUB(NOW(), INTERVAL 6 MONTH)) AS open6m
+       -- Aging reads the same open set, so "open over 3 months" cannot mean
+       -- something different from the Open tile directly above it.
+       SUM(t.status IN (${placeholders(OPEN_STATES)}) AND t.raised_at < DATE_SUB(NOW(), INTERVAL 1 MONTH)) AS open1m,
+       SUM(t.status IN (${placeholders(OPEN_STATES)}) AND t.raised_at < DATE_SUB(NOW(), INTERVAL 3 MONTH)) AS open3m,
+       SUM(t.status IN (${placeholders(OPEN_STATES)}) AND t.raised_at < DATE_SUB(NOW(), INTERVAL 6 MONTH)) AS open6m
      FROM ticket t
      WHERE ${where}`,
     // param order follows the placeholders above: openCount, criticalCount,
     // closedCount, then the scope clause.
-    [...NOT_OPEN_STATES, ...NOT_OPEN_STATES, ...DONE_STATES, ...scope.params],
+    // openCount, criticalCount, closedCount, open1m, open3m, open6m, then scope.
+    [
+      ...OPEN_STATES,
+      ...OPEN_STATES,
+      ...DONE_STATES,
+      ...OPEN_STATES,
+      ...OPEN_STATES,
+      ...OPEN_STATES,
+      ...scope.params,
+    ],
   );
 
   const byStatusRows = await run(
@@ -1652,20 +1940,20 @@ async function getDashboard(req) {
   const byDeptRows = await run(
     `SELECT t.department,
             COUNT(*) AS total,
-            SUM(t.status NOT IN (${placeholders(NOT_OPEN_STATES)})) AS openCount,
-            SUM(t.status NOT IN ('Closed', 'Sent Back') AND t.due_at < NOW()) AS overdueCount
+            SUM(t.status IN (${placeholders(OPEN_STATES)})) AS openCount,
+            SUM(${LATE_SQL}) AS overdueCount
        FROM ticket t WHERE ${where}
       GROUP BY t.department ORDER BY openCount DESC`,
-    [...NOT_OPEN_STATES, ...scope.params],
+    [...OPEN_STATES, ...scope.params],
   );
   const byBranchRows = await run(
     `SELECT t.branch_name,
             COUNT(*) AS total,
-            SUM(t.status NOT IN (${placeholders(NOT_OPEN_STATES)})) AS openCount,
-            SUM(t.status NOT IN ('Closed', 'Sent Back') AND t.due_at < NOW()) AS overdueCount
+           SUM(t.status IN (${placeholders(OPEN_STATES)})) AS openCount,
+            SUM(${LATE_SQL}) AS overdueCount
        FROM ticket t WHERE ${where}
       GROUP BY t.branch_name ORDER BY openCount DESC`,
-    [...NOT_OPEN_STATES, ...scope.params],
+    [...OPEN_STATES, ...scope.params],
   );
 
   const num = (v) => Number(v) || 0;
@@ -1756,6 +2044,102 @@ async function getDashboard(req) {
   };
 }
 
+// ─── APPROVAL REMINDERS ──────────────────────────────────────────────────────
+/**
+ * WhatsApp every Cluster Head whose approval deadline has passed.
+ *
+ * Called by the cron sweep in app.js, not by any request. Idempotent by
+ * construction: `approval_reminder_sent_at` is stamped on the way out, so a
+ * sweep running every ten minutes sends one message, not six an hour.
+ *
+ * The stamp goes on even when the send fails or there is no number on file.
+ * That is deliberate — a row that can never succeed would otherwise be retried
+ * every ten minutes forever, and the warning below is the thing that actually
+ * gets the number fixed.
+ */
+async function sendApprovalReminders() {
+  const rows = await run(
+    `SELECT ticket_id, ticket_ref, branch_name, department, issue_type,
+            priority, raised_by_name, raised_at, approval_due_at,
+            cluster_head_mobile, cluster_head_email
+       FROM ticket
+      WHERE is_deleted = 0
+        AND status = ?
+        AND approval_due_at IS NOT NULL
+        AND approval_reminder_sent_at IS NULL
+        AND approval_due_at <= NOW()
+      ORDER BY approval_due_at ASC
+      LIMIT 200`,
+    [STATUS.OPEN],
+  );
+  if (!rows.length) return { due: 0, sent: 0, skipped: 0 };
+
+  let sent = 0;
+  let skipped = 0;
+
+  for (const t of rows) {
+    const ref = t.ticket_ref || `#${t.ticket_id}`;
+
+    // Working minutes, not wall-clock: over a weekend the real elapsed time
+    // reads as "40 hours", which makes the message look broken.
+    const waited = workingMinutesBetween(t.raised_at, new Date());
+    const pendingFor =
+      waited >= 60
+        ? `${Math.floor(waited / 60)} working hour${waited >= 120 ? "s" : ""}`
+        : `${waited} minutes`;
+
+    if (t.cluster_head_mobile) {
+      const res = await sendTemplate({
+        mobile: t.cluster_head_mobile,
+        templateName: CONFIG.APPROVAL_REMINDER_TEMPLATE,
+        parameters: [
+          { name: "ticket_ref", value: ref },
+          { name: "branch_name", value: t.branch_name || "-" },
+          { name: "issue_type", value: t.issue_type || "-" },
+          { name: "priority", value: t.priority || "-" },
+          { name: "raised_by", value: t.raised_by_name || "-" },
+          { name: "pending_for", value: pendingFor },
+        ],
+      });
+      if (res.sent) sent++;
+    } else {
+      skipped++;
+      console.warn(
+        `ticketing: ${ref} passed its approval deadline but no ` +
+          `cluster_head_mobile is on the row — no WhatsApp sent. The Cluster ` +
+          `Head for ${t.branch_name} may have no mobile in Firestore.`,
+      );
+    }
+
+    // Email as well, where an address is on file. Same infrastructure the rest
+    // of the workflow uses, and a Cluster Head at a desk is likelier to act on
+    // it than on a phone notification.
+    notifyForTicket(t.ticket_id, "APPROVAL_REMINDER");
+
+    await run(
+      `UPDATE ticket SET approval_reminder_sent_at = NOW() WHERE ticket_id = ?`,
+      [t.ticket_id],
+    );
+
+    // Into the trail, so a branch asking "did anyone chase this" has an answer
+    // and the delay is visible on the ticket rather than only in the logs.
+    await run(
+      `INSERT INTO ticket_activity
+         (ticket_id, action, from_status, to_status, actor_mobile, actor_name,
+          actor_role, remark, created_at)
+       VALUES (?, 'APPROVAL_REMINDER', ?, ?, 'SYSTEM', 'System', 'System', ?, NOW())`,
+      [
+        t.ticket_id,
+        STATUS.OPEN,
+        STATUS.OPEN,
+        `Approval overdue — reminder sent to the Cluster Head after ${pendingFor}.`,
+      ],
+    );
+  }
+
+  return { due: rows.length, sent, skipped };
+}
+
 module.exports = {
   CONFIG,
   ROLES,
@@ -1774,6 +2158,7 @@ module.exports = {
   createTicket,
   transitionTicket,
   getDashboard,
+  sendApprovalReminders,
   // shared with ticketUserModel.js and recruitmentModel.js
   run,
   withTransaction,

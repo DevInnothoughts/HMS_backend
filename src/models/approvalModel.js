@@ -1,5 +1,24 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 
+const excludedNumbers = [
+  "+917411951943",
+  "+918123922650",
+  "+917411804875",
+  "+918147647685",
+  "+917411951965",
+  "+917411805024",
+  "+917411951962",
+  "+918971928968",
+  "+918123919853",
+  "+918123919853",
+  "+918147647677",
+  "+917411951963",
+  "+918792498991",
+  "+919164045999",
+  "+918855865060",
+  "+918888188885",
+];
+
 const getCallAndWebData = async (req) => {
   const { connection, location } = getConnectionByLocation(req.query.location);
 
@@ -38,6 +57,10 @@ const getCallAndWebData = async (req) => {
   const ivrDateRangeParam = [inputDate, inputDate];
   const helplineTimestampParam = [startOfDay, endOfDay];
 
+  const excludedNumbersSQL = excludedNumbers
+    .map((number) => connection.escape(number))
+    .join(",");
+
   // Reusable query executor
   const executeQuery = (sql, values = []) => {
     return new Promise((resolve, reject) => {
@@ -67,16 +90,17 @@ const getCallAndWebData = async (req) => {
           AND destination_no != ''
         ORDER BY ivr_id DESC
       `,
-        ivrDateParam
+        ivrDateParam,
       ),
       executeQuery(
         `
         SELECT *
         FROM phonecalllogs
         WHERE timestamp BETWEEN ? AND ?
+         AND phoneNumber NOT IN (${excludedNumbersSQL})
         ORDER BY timestamp DESC
       `,
-        helplineTimestampParam
+        [...helplineTimestampParam, ...excludedNumbers],
       ),
       executeQuery(
         `
@@ -87,7 +111,7 @@ const getCallAndWebData = async (req) => {
           AND call_status = 'Missed'
           AND destination_no != ''
       `,
-        ivrDateRangeParam
+        ivrDateRangeParam,
       ),
       executeQuery(
         `
@@ -98,34 +122,37 @@ const getCallAndWebData = async (req) => {
           AND call_status = 'Answered'
           AND destination_no != ''
       `,
-        ivrDateRangeParam
+        ivrDateRangeParam,
       ),
       executeQuery(
         `
         SELECT COUNT(*) AS helpline_missed_count
         FROM phonecalllogs
         WHERE timestamp BETWEEN ? AND ?
+        AND phoneNumber NOT IN (${excludedNumbersSQL})
           AND (type = 'MISSED' OR type = 'UNKNOWN')
       `,
-        helplineTimestampParam
+        [...helplineTimestampParam, ...excludedNumbers],
       ),
       executeQuery(
         `
         SELECT COUNT(*) AS helpline_answered_count
         FROM phonecalllogs
         WHERE timestamp BETWEEN ? AND ?
+        AND phoneNumber NOT IN (${excludedNumbersSQL})
           AND type = 'INCOMING'
       `,
-        helplineTimestampParam
+        [...helplineTimestampParam, ...excludedNumbers],
       ),
       executeQuery(
         `
         SELECT COUNT(*) AS helpline_outgoing_count
         FROM phonecalllogs
         WHERE timestamp BETWEEN ? AND ?
+        AND phoneNumber NOT IN (${excludedNumbersSQL})
           AND type = 'OUTGOING'
       `,
-        helplineTimestampParam
+        [...helplineTimestampParam, ...excludedNumbers],
       ),
     ]);
 
@@ -510,8 +537,8 @@ async function addApprovalDetails(data) {
           tempCon.release();
           reject(
             new Error(
-              "Invalid subRole provided. Expected 'Owner' or 'Cluster Head'."
-            )
+              "Invalid subRole provided. Expected 'Owner' or 'Cluster Head'.",
+            ),
           );
         }
       });
@@ -524,7 +551,7 @@ async function getApprovalDetails(location) {
   const { connection } = getConnectionByLocation(location);
   if (!connection) {
     const err = new Error(
-      `Invalid location for approval retrieval: ${location}`
+      `Invalid location for approval retrieval: ${location}`,
     );
     err.status = 404;
     throw err;
@@ -593,13 +620,13 @@ const getIPDReportData = async (req) => {
         Promise.all([
           new Promise((res, rej) =>
             tempCon.query(collectionQuery, queryParams, (e, r) =>
-              e ? rej(e) : res(r)
-            )
+              e ? rej(e) : res(r),
+            ),
           ),
           new Promise((res, rej) =>
             tempCon.query(billsQuery, queryParams, (e, r) =>
-              e ? rej(e) : res(r)
-            )
+              e ? rej(e) : res(r),
+            ),
           ),
         ])
           .then(([ipdCollection, ipdBills]) => {
@@ -629,7 +656,7 @@ async function getApprovalStatusSummary(req) {
   const { connection } = getConnectionByLocation(location);
   if (!connection) {
     const err = new Error(
-      `Invalid location for approval retrieval: ${location}`
+      `Invalid location for approval retrieval: ${location}`,
     );
     err.status = 404;
     throw err;

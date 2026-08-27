@@ -502,7 +502,7 @@ const getOPDCollectionV3 = async (req) => {
       "CONSULTATION",
       "PROCTOSCOPY",
       "FOLLOW-UP",
-      "BUGSPEAKS",
+      "POSTOPERATIVE",
     ];
     const {
       consultationTotals: opdConsultationTotals,

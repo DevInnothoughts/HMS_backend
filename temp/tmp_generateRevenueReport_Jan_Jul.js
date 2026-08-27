@@ -62,7 +62,17 @@ const {
 // Same four branches as the Jan–Jun revenue workbook. Note the model preserves
 // this array's order for the By Location sheets (it does NOT sort by revenue,
 // unlike the surgery report), so keep the order you want in the output.
-const DEFAULT_LOCATIONS = ["Andheri", "Navi Mumbai", "Thane", "Vashi"];
+const DEFAULT_LOCATIONS = [
+  "HSR",
+  "Indiranagar",
+  "JP Nagar",
+  "Rajaji Nagar",
+  "Sarjapura",
+  "Whitefield",
+  "Electronic City",
+  "Sahakar Nagar",
+  "RR Nagar",
+];
 
 const argLocations = (process.argv[2] || "")
   .split(",")

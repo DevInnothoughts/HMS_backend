@@ -52,7 +52,7 @@ async function initiateTransaction() {
   const payload = {
     tid: "65136209",
     amount: "1",
-    actionId: "1",
+    actionId: "133",
     type: "SALE",
     organization_code: "Retail",
     requestUrn: "HMS-BILL-4568",

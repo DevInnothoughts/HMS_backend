@@ -19,13 +19,23 @@
 //   POST   /tickets/:id/approve      Cluster Head  → Approved
 //                                     (sets department, priority, resolution time)
 //   POST   /tickets/:id/reconsider   Cluster Head  → Sent Back
-//   POST   /tickets/:id/progress     Dept Head     → In Progress | Waiting for Vendor
+//   POST   /tickets/:id/progress     Dept Head/User→ In Progress | Waiting for Vendor
+//   POST   /tickets/:id/assign       Dept Head     → Assigned (to a team member)
+//   POST   /tickets/:id/fix          Dept User     → Pending Approval
+//   POST   /tickets/:id/dept-approve Dept Head     → Resolved
+//   POST   /tickets/:id/send-back    Dept Head     → Assigned (rework)
 //   POST   /tickets/:id/reassign     Dept Head     → Approved, new department (wrong one)
 //   POST   /tickets/:id/forward      Dept Head     → Approved, new department (work done)
 //   POST   /tickets/:id/resolve      Dept Head     → Resolved
-//   POST   /tickets/:id/close        Dept Head     → Closed
+//   POST   /tickets/:id/close        Branch        → Closed
 //   POST   /tickets/:id/reopen       Raiser        → Reopened
 //   POST   /tickets/:id/comment      anyone with access
+//
+//   GET    /users                    Dept Head: their own team
+//   GET    /assignees                Dept Head: the assign-to picker
+//   POST   /users                    Dept Head: add a Department User
+//   PUT    /users/:mobile            Dept Head: edit one
+//   DELETE /users/:mobile            Dept Head: remove one
 //
 //   POST   /roster                   Admin panel: upsert a Head/User roster row
 //                                     (pairs with AddUserForm's Firestore write)
@@ -81,11 +91,19 @@ const send = (handler) => async (req, res, next) => {
 const transition = (action) => send((req) => transitionTicket(req, action));
 
 // ─── roster onboarding from the admin panel ──────────────────────────────────
-// The in-app /users CRUD is gone with PDF §2 — a head has no team to manage.
-// These two remain because they are how a Department Head gets a roster row at
+// A head has a team again, so the in-app /users CRUD is back below. These two
+// remain the ADMIN path: they are how a Department Head gets a roster row at
 // all, and without one they resolve to department = null and see nothing.
 router.post("/roster", send(upsertRosterUser));
 router.delete("/roster", send(removeRosterUser));
+
+// ─── the head's own team ─────────────────────────────────────────────────────
+// Scoped to the caller's department server-side; a head cannot reach another's.
+router.get("/users", send(listUsers));
+router.get("/assignees", send(listAssignees));
+router.post("/users", send(addUser));
+router.put("/users/:mobile", send(updateUser));
+router.delete("/users/:mobile", send(deleteUser));
 
 // ─── tickets ─────────────────────────────────────────────────────────────────
 router.get("/meta", send(getMeta));
@@ -110,5 +128,9 @@ router.post("/tickets/:id/resolve", transition("resolve"));
 router.post("/tickets/:id/close", transition("close"));
 router.post("/tickets/:id/reopen", transition("reopen"));
 router.post("/tickets/:id/comment", transition("comment"));
+router.post("/tickets/:id/assign", transition("assign"));
+router.post("/tickets/:id/fix", transition("fix"));
+router.post("/tickets/:id/dept-approve", transition("deptApprove"));
+router.post("/tickets/:id/send-back", transition("sendBack"));
 
 module.exports = router;

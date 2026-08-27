@@ -32,6 +32,8 @@ const targetComparisonNewController = require("./src/controllers/targetCompariso
 const ticketingController = require("./src/controllers/ticketingController");
 const recruitmentController = require("./src/controllers/recruitmentController");
 const hexaLeadController = require("./src/controllers/hexaLeadsController");
+const { sendApprovalReminders } = require("./src/models/ticketingModel");
+const { isReminderWindow } = require("./src/services/businessHours");
 
 const {
   syncAppointments,
@@ -129,8 +131,10 @@ app.use("/hms/hexaLead", hexaLeadController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(err.status || 500).send(err.message || "Something went wrong!");
+  const status = err.status || 500;
+  res.status(status).json({
+    error: status === 500 ? "Internal server error" : err.message,
+  });
 });
 
 // Schedule every 3 hours (at minute 0 of hour 0, 3, 6, 9, 12, 15, 18, 21)
@@ -196,6 +200,34 @@ cron.schedule(
 //   {
 //     timezone: "Asia/Kolkata", // Ensure correct timezone
 //   },
+// );
+
+// ── Cluster Head approval reminders ──────────────────────────────────────────
+// Every ten minutes: any ticket still at `Open` past its 3-working-hour
+// approval deadline gets one WhatsApp to the Cluster Head. The window guard is
+// belt and braces — a deadline computed in working hours always lands inside
+// them, so this only matters if the server was down and a backlog built up
+// overnight, which must not then flush onto someone's phone at 3 a.m.
+// cron.schedule(
+//   "*/10 * * * *",
+//   async () => {
+//     if (!isReminderWindow()) return;
+//     try {
+//       const r = await sendApprovalReminders();
+//       if (r.due) {
+//         console.log(
+//           `ticketing: ${r.due} ticket(s) past approval deadline — ` +
+//             `${r.sent} reminder(s) sent, ${r.skipped} with no mobile on file.`,
+//         );
+//       }
+//     } catch (e) {
+//       console.error(
+//         "ticketing: approval reminder sweep failed:",
+//         e && e.message,
+//       );
+//     }
+//   },
+//   { timezone: "Asia/Kolkata" },
 // );
 
 // Start the server

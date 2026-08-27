@@ -258,12 +258,30 @@ const RULES = {
     ],
     line: (t) => `A ticket has been forwarded to ${t.department} to continue.`,
   },
+  // The 3-working-hour approval deadline came and went. Same recipient as the
+  // original RAISED notification — the point is that they have not acted on it.
+  APPROVAL_REMINDER: {
+    who: (t) => ok(t.cluster_head_email),
+    line: (t) =>
+      `Still waiting on you: a ticket from ${t.branch_name} has passed its ` +
+      `approval deadline.`,
+  },
+  // An ASK, not an FYI: the branch is who closes it. This mail is the only
+  // thing that tells them a step is waiting on them, so it has to say so.
   RESOLVED: {
     who: (t) => ok(t.raised_by_email),
-    line: () => `Your ticket has been resolved.`,
+    line: () =>
+      `Your ticket has been resolved — please check it and close it, or reopen it.`,
   },
-  // The department head closes without the branch's say-so now (PDF §2), so the
-  // branch has to be told rather than doing it themselves.
+  // deptApprove lands on Resolved, but the generic notifier fires the
+  // ACTION_LOG verb — so without a rule under THIS name the branch hears
+  // nothing. Same words as RESOLVED because it is the same event from the
+  // branch's side; they neither know nor care which internal route produced it.
+  DEPT_APPROVED: {
+    who: (t) => ok(t.raised_by_email),
+    line: () =>
+      `Your ticket has been resolved — please check it and close it, or reopen it.`,
+  },
   CLOSED: {
     who: (t) => ok(t.raised_by_email),
     line: () => `Your ticket has been closed.`,
@@ -272,6 +290,21 @@ const RULES = {
     who: (t, run) => deptHeadEmail(run, t.department),
     line: () =>
       `A resolved ticket has been reopened and is back with your department.`,
+  },
+  // The head wants it redone. Goes to the person holding it, never the branch.
+  REWORK: {
+    who: (t) => ok(t.assignee_email),
+    line: () => `A fix you submitted has been sent back for rework.`,
+  },
+  ASSIGNED: {
+    who: (t) => ok(t.assignee_email),
+    line: (t) => `A ${t.priority} ticket from ${t.branch_name} is now yours.`,
+  },
+  // Up to the head, not out to the branch — the branch hears nothing until the
+  // head has agreed the fix is real.
+  FIXED: {
+    who: (t) => ok(t.dept_head_email),
+    line: () => `A fix is waiting for your sign-off.`,
   },
 };
 

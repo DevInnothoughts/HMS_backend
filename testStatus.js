@@ -2,9 +2,9 @@ const crypto = require("crypto");
 
 // --- Worldline UAT config ---
 const CONFIG = {
-  url: "https://bouat.mrlpay.com/pcpos4/StatusCheck.php?source=629",
-  aesKey: "X5mUl3J1jneCd0adISoHWDTj7U8Rnhvd", // 32 chars -> AES-256
-  aesIv: "1111111245683783", // 16 chars
+  url: "https://lb.mrlpay.com/pcpos4/StatusCheck.php?source=988",
+  aesKey: "bTrpIKF4VDZf1MwUx1N362L0aeyzSUu2", // 32 chars -> AES-256
+  aesIv: "czAJaZIH3DTgbz0w", // 16 chars
 };
 
 // Body shape. Your Initiate call works by POSTing the bare cipher string,
@@ -155,8 +155,8 @@ module.exports = {
 // --- Run directly:  node check-status.js ---
 if (require.main === module) {
   checkStatus({
-    urn: "75122", // <-- the urn returned by initiateTransaction
-    tid: "2532415U",
+    urn: "14131081", // <-- the urn returned by initiateTransaction
+    tid: "65136209",
     requestUrn: "HMS-BILL-4568",
   })
     .then((response) => console.log("\n=== RESULT OBJECT ===\n", response))

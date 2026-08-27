@@ -42,7 +42,17 @@ const {
 
 // Same four branches as the Jan–Jun workbook, so the two files are comparable.
 // Keep the strings exactly as getConnectionByLocation expects them.
-const DEFAULT_LOCATIONS = ["Navi Mumbai", "Andheri", "Thane", "Vashi"];
+const DEFAULT_LOCATIONS = [
+  "HSR",
+  "Indiranagar",
+  "JP Nagar",
+  "Rajaji Nagar",
+  "Sarjapura",
+  "Whitefield",
+  "Electronic City",
+  "Sahakar Nagar",
+  "RR Nagar",
+];
 
 const argLocations = (process.argv[2] || "")
   .split(",")
