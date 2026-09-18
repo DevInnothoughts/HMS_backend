@@ -25,6 +25,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { isSurgeryAdvised } = require("./adviceUtils");
 
 const makeRunner =
   (connection) =>
@@ -198,11 +199,7 @@ async function getConvincingInsights(req) {
       assistantId: r.assistanceDoctor,
       assistantName: (r.assistantName || "").trim() || null,
       speciality: (r.speciality || "").toString().trim() || "Unspecified",
-      surgery:
-        String(r.diagnosisAdvice || "")
-          .replace(/,$/, "")
-          .trim()
-          .toLowerCase() !== "medication",
+      surgery: isSurgeryAdvised(r.diagnosisAdvice),
       subTypes: parseSubTypes(r.provisionalDiagnosis),
     };
   }

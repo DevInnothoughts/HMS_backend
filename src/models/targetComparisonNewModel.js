@@ -795,4 +795,6 @@ module.exports = {
   sumTargetValues,
   isSuperAdmin,
   pickPrimaryYearly,
+  getLabRevenue,
+  getLabConsultationNames,
 };

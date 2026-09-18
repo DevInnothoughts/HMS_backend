@@ -34,6 +34,8 @@ const recruitmentController = require("./src/controllers/recruitmentController")
 const hexaLeadController = require("./src/controllers/hexaLeadsController");
 const { sendApprovalReminders } = require("./src/models/ticketingModel");
 const { isReminderWindow } = require("./src/services/businessHours");
+const practoLeadController = require("./src/controllers/practoLeadController");
+const overViewController = require("./src/controllers/overviewController");
 
 const {
   syncAppointments,
@@ -51,9 +53,15 @@ const {
   generateReport,
   generatePatientHistoryReport,
 } = require("./src/models/consolidatedDataModel");
+const {
+  generateAllBranchFeedbackExcel,
+} = require("./temp/tmp_generateFeedbackReport");
+const {
+  generateSurgeryPendingExcel,
+} = require("./temp/tmp_generateSurgeryPendingReport");
 
 const locations = [
-  "DP Road",
+  //"DP Road",
   "Andheri",
   "Baner",
   "Belgavi",
@@ -94,6 +102,7 @@ const locations = [
   "Electronic City",
   "RR Nagar",
   "Adajan",
+  "Raipur",
 ];
 
 app.use(express.json());
@@ -128,6 +137,8 @@ app.use("/hms/targetComparisonNew", targetComparisonNewController);
 app.use("/hms/ticketing", ticketingController);
 app.use("/hms/recruitment", recruitmentController);
 app.use("/hms/hexaLead", hexaLeadController);
+app.use("/hms/practoLead", practoLeadController);
+app.use("/hms/overview", overViewController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -179,7 +190,7 @@ cron.schedule(
 
 // Schedule at 12:30 AM every day
 // cron.schedule(
-//   "*/2 * * * *",
+//   "*/1 * * * *",
 //   //"30 0 * * *",
 //   async () => {
 //     try {
@@ -187,12 +198,26 @@ cron.schedule(
 //       //await generateAndSendReport("shubham.khatod17594@gmail.com"); // replace with actual email
 //       //await generateReport("2026-03-01", "2026-03-31"); // For testing, use a wide date range to get all data. Replace with actual date range in production.
 //       //generateDSRRangeExcel("2026-05-01", "2026-05-31", locations);
-//       const history = await generatePatientHistoryReport(
-//         "2026-01-01",
-//         "2026-06-30",
-//         ["Andheri", "Thane", "Navi Mumbai", "Vashi"],
-//       );
-//       console.log("Report generated successfully:", history);
+//       // const history = await generatePatientHistoryReport(
+//       //   "2026-01-01",
+//       //   "2026-06-30",
+//       //   ["Andheri", "Thane", "Navi Mumbai", "Vashi"],
+//       // );
+//       // generateAllBranchFeedbackExcel({
+//       //   from: "2026-08-20",
+//       //   to: "2026-09-11",
+//       //   locations,
+//       // })
+//       //   .then((r) => console.log("Feedback workbook:", r.filePath))
+//       //   .catch((e) => console.error("Feedback workbook failed:", e.message));
+//       //console.log("Report generated successfully:", history);
+//       // generateSurgeryPendingExcel({
+//       //   from: "2026-06-01",
+//       //   to: "2026-08-31",
+//       //   locations: ["Thane", "Andheri", "Navi Mumbai", "Vashi"],
+//       // })
+//       //   .then((r) => console.log("Pending surgery workbook:", r.filePath))
+//       //   .catch((e) => console.error("Pending surgery failed:", e.message));
 //     } catch (err) {
 //       console.error("Error in sending report:", err);
 //     }

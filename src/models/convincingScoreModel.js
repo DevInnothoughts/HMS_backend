@@ -1,4 +1,5 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { adviceBucket } = require("./adviceUtils");
 // Parse the provisionalDiagnosis TEXT column into an object, safely. It stores
 // JSON like {"piles":["Grade 2"],"fistula":["Fistula in Ano"]} — keys are
 // specialities, values are sub-type arrays. Handles null / '' / '{}' / malformed.
@@ -875,9 +876,11 @@ GROUP BY d.patient_id;
       assistantDoctors,
       branchTotal: {
         newAppointmentCount: newPatientIds.length,
-        totalDiagnosisCount: mainDoctorRows.length,
+        totalDiagnosisCount: new Set(mainDoctorRows.map((r) => r.patient_id))
+          .size,
         totalMedication: totalCounts.Medication,
         totalSurgery: totalCounts.Surgery,
+        totalOther: totalCounts.Other,
         totalSurgeriesPerformed: totalSurgeriesPerformed,
       },
     };
@@ -979,14 +982,6 @@ function processDiagnosisData1(
       }
 
       doctorMap[doctorId].patientIds.add(row.patient_id);
-
-      // Classify this diagnosis's advice (anything not "medication" = Surgery).
-      const adviceRaw = row.diagnosisAdvice || "Unknown";
-      let advice = adviceRaw.toString().replace(/,$/, "").trim();
-      if (advice.toLowerCase() !== "medication") {
-        advice = "Surgery";
-      }
-
       // Assign each patient to ONE speciality (latest diagnosis wins — rows are
       // ordered by date_diagnosis ascending). This keeps the per-speciality
       // patient counts summing to patientCount, and covers every diagnosed
@@ -995,9 +990,14 @@ function processDiagnosisData1(
       const speciality =
         (row.speciality || "").toString().trim() || "Unspecified";
       const provisional = parseProvisional(row.provisionalDiagnosis);
+      // Classify this diagnosis's advice. Surgery ONLY when Surgery was actually
+      // advised — Test / MCDPA / blank are neither Surgery nor Medication.
+      const bucket = adviceBucket(row.diagnosisAdvice);
+
       doctorMap[doctorId].patientSpeciality.set(row.patient_id, {
         speciality,
-        surgeryAdvised: advice === "Surgery",
+        adviceBucket: bucket,
+        surgeryAdvised: bucket === "Surgery", // keep — buildSpecialityBreakdown reads this
         subTypes: subTypesFor(provisional, speciality),
       });
     });
@@ -1006,11 +1006,15 @@ function processDiagnosisData1(
       // Doctor-level Surgery / Medication as DISTINCT patients (by latest
       // diagnosis). This makes them equal the sum of the per-speciality funnel
       // and partition patientCount (Surgery + Medication === patientCount).
+      // Surgery / Medication / Other as DISTINCT patients (latest diagnosis).
+      // Three-way now — Test, MCDPA and blank advice are neither.
       let surgeryPatients = 0;
       let medicationPatients = 0;
+      let otherPatients = 0;
       for (const [, info] of doc.patientSpeciality) {
-        if (info.surgeryAdvised) surgeryPatients++;
-        else medicationPatients++;
+        if (info.adviceBucket === "Surgery") surgeryPatients++;
+        else if (info.adviceBucket === "Medication") medicationPatients++;
+        else otherPatients++;
       }
 
       return {
@@ -1021,6 +1025,7 @@ function processDiagnosisData1(
         diagnosisCounts: {
           Surgery: surgeryPatients,
           Medication: medicationPatients,
+          Other: otherPatients,
         },
         invoiceCount: doc.invoiceCount,
         totalSurgeriesDone: procedureMap[doc.doctorId] || 0,
@@ -1054,9 +1059,10 @@ function processDiagnosisData1(
     (totals, doc) => {
       totals.Medication += doc.diagnosisCounts.Medication;
       totals.Surgery += doc.diagnosisCounts.Surgery;
+      totals.Other += doc.diagnosisCounts.Other;
       return totals;
     },
-    { Medication: 0, Surgery: 0 },
+    { Medication: 0, Surgery: 0, Other: 0 },
   );
 
   return { consultantDoctors, assistantDoctors, totalCounts };
@@ -1113,21 +1119,15 @@ function processDiagnosisData(
           doctorId,
           doctorName,
           patientIds: new Set(),
-          diagnosisCounts: { Surgery: 0, Medication: 0 },
+          diagnosisCounts: { Surgery: 0, Medication: 0, Other: 0 },
           invoiceCount: invoiceMap[doctorId] || 0, // total invoices
           surgeryPerformed: surgeryMap[doctorId] || 0, // surgeries in same month
         };
       }
 
       doctorMap[doctorId].patientIds.add(row.patient_id);
-
       // Count diagnosis advice
-      const adviceRaw = row.diagnosisAdvice || "Unknown";
-      let advice = adviceRaw.toString().replace(/,$/, "").trim();
-      if (advice.toLowerCase() !== "medication") {
-        advice = "Surgery";
-      }
-      doctorMap[doctorId].diagnosisCounts[advice]++;
+      doctorMap[doctorId].diagnosisCounts[adviceBucket(row.diagnosisAdvice)]++;
     });
 
     return Object.values(doctorMap).map((doc) => ({
@@ -1160,9 +1160,10 @@ function processDiagnosisData(
     (totals, doc) => {
       totals.Medication += doc.diagnosisCounts.Medication;
       totals.Surgery += doc.diagnosisCounts.Surgery;
+      totals.Other += doc.diagnosisCounts.Other;
       return totals;
     },
-    { Medication: 0, Surgery: 0 },
+    { Medication: 0, Surgery: 0, Other: 0 },
   );
 
   return { consultantDoctors, assistantDoctors, totalCounts };

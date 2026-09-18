@@ -561,4 +561,5 @@ module.exports = {
   getReport,
   getConditionwiseReport,
   getIPDBillsV2,
+  resolveInsuranceNames,
 };

@@ -79,6 +79,10 @@ const { getConnectionByLocation } = require("../databaseUtils");
 
 // Same four branches, same order as the other Jan–Jun workbooks.
 const DEFAULT_LOCATIONS = [
+  "Andheri",
+  "Navi Mumbai",
+  "Thane",
+  "Vashi",
   "HSR",
   "Indiranagar",
   "JP Nagar",
@@ -103,7 +107,7 @@ const LOCATIONS = argLocations.length ? argLocations : DEFAULT_LOCATIONS;
 const YEAR = Number(process.argv[3]) || 2026;
 const PREVIOUS_YEAR = YEAR - 1;
 const START_MONTH = Number(process.argv[4]) || 1;
-const END_MONTH = Number(process.argv[5]) || 7; // ← July
+const END_MONTH = Number(process.argv[5]) || 8; // ← August
 
 /* ── Shared helpers ──────────────────────────────────────────────────────── */
 
@@ -363,7 +367,7 @@ async function getMonthwiseLab(locations, options = {}) {
   const year = Number(options.year) || 2026;
   const previousYear = Number(options.previousYear) || year - 1;
   const startMonth = Number(options.startMonth) || 1;
-  const endMonth = Number(options.endMonth) || 7;
+  const endMonth = Number(options.endMonth) || 8; // ← August
   if (endMonth < startMonth) {
     throw new Error("`endMonth` cannot be earlier than `startMonth`.");
   }

@@ -1,4 +1,6 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { resolveInsuranceNames } = require("./reportModel");
+const { addCompanyNames } = require("./utils/insuranceNames");
 
 const getIPDCollection = async (req) => {
   console.log(req.params.location);
@@ -659,6 +661,7 @@ const getIPDBillsV3 = async (req) => {
               p.sex,
               i.discount,
               i.status,
+              i.insurancecompany AS insurance_company,
               i.payable_amt,
               i.totalamt,
               i.totaldue,
@@ -689,7 +692,10 @@ const getIPDBillsV3 = async (req) => {
         sql += `
           GROUP BY 
               i.invoice_id, i.patient_id, p.name, p.phone, p.sex, 
-              i.discount, i.status, i.payable_amt, i.totalamt, i.totaldue
+              i.discount, i.status, i.insurancecompany,
+              i.payable_amt, i.totalamt, i.totaldue,
+              i.creation_date, i.due_date,
+              iv.receivedamt, iv.tdsamt
         `;
 
         tempCon.query(sql, queryParams, (error, result) => {
@@ -729,13 +735,143 @@ const getIPDBillsV3 = async (req) => {
         });
       });
     });
-    console.log(rows);
+    //console.log(rows);
+    // The id space changed on 1 Jul 2026 — branch-local before, master
+    // insuranceMasterData after — so a plain JOIN on insurance_company returns
+    // blank for every recent invoice. resolveInsuranceNames routes each row by
+    // its own date and overwrites insurance_company in place with the NAME.
+    await resolveInsuranceNames(rows, connection, "admission_date");
     return {
       ipdBills: rows,
       statusWiseTotals: typeTotals,
     };
   } catch (error) {
     console.error("Error in getIPDBillsV2:", error);
+    throw error;
+  }
+};
+
+/**
+ * getIPDBillsV4 — V3 plus insurer and TPA names.
+ *
+ * V3 is untouched and still serves the live screens. V4 returns V3's rows with
+ * four extra keys — insurancecompany, tpa, insurance_company_name,
+ * tpa_company_name — and the identical envelope { ipdBills, statusWiseTotals }.
+ * Existing consumers of V3 are unaffected; a V4 consumer reads the extra keys.
+ */
+const getIPDBillsV4 = async (req) => {
+  const { connection } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  const { from, to, status = "" } = req.query;
+  const hasStatusFilter = status && status.trim() !== "";
+
+  try {
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+
+        let sql = `
+          SELECT 
+              i.invoice_id,
+              i.patient_id,
+              i.creation_date AS admission_date,
+              i.due_date AS discharge_date,
+              p.name,
+              p.phone,
+              p.sex,
+              i.discount,
+              i.status,
+              i.insurancecompany,
+              i.tpa,
+              i.payable_amt,
+              i.totalamt,
+              i.totaldue,
+              iv.receivedamt,
+              iv.tdsamt AS actualTDS,
+              COALESCE(SUM(
+                  COALESCE(ip.cashamt, 0) + 
+                  COALESCE(ip.cardamt, 0) + 
+                  COALESCE(ip.chequeamt, 0) + 
+                  COALESCE(ip.onlineamt, 0)
+              ), 0) AS collection
+          FROM invoice i
+          JOIN patient p ON i.patient_id = p.patient_id
+          LEFT JOIN ipd_payment ip ON i.invoice_id = ip.invoice_id
+          LEFT JOIN insurance_invoice iv ON i.invoice_id = iv.invoiceid
+          WHERE i.creation_date >= ?  
+            AND i.creation_date <= ?
+            AND i.is_deleted != 1
+        `;
+
+        const queryParams = [from, to];
+
+        if (hasStatusFilter) {
+          sql += ` AND i.status = ?`;
+          queryParams.push(status);
+        }
+
+        sql += `
+          GROUP BY 
+              i.invoice_id, i.patient_id, i.creation_date, i.due_date,
+              p.name, p.phone, p.sex, i.discount, i.status,
+              i.insurancecompany, i.tpa,
+              i.payable_amt, i.totalamt, i.totaldue,
+              iv.receivedamt, iv.tdsamt
+        `;
+
+        tempCon.query(sql, queryParams, (error, result) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(result);
+        });
+      });
+    });
+
+    const typeTotals = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+
+        let summarySql = `
+          SELECT i.status, SUM(i.totalamt) AS total_amount
+          FROM invoice i
+          WHERE i.creation_date >= ?
+            AND i.creation_date <= ?
+            AND i.is_deleted != 1
+        `;
+
+        const summaryParams = [from, to];
+
+        if (hasStatusFilter) {
+          summarySql += ` AND i.status = ?`;
+          summaryParams.push(status);
+        }
+
+        summarySql += ` GROUP BY i.status`;
+
+        tempCon.query(summarySql, summaryParams, (error, result) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(result);
+        });
+      });
+    });
+
+    // Insurer and TPA share one id space and one 1 Jul 2026 cutover, so both
+    // resolve in a single pass. Names are ADDED as *_name; the raw ids stay.
+    await addCompanyNames(rows, connection, "admission_date", [
+      "insurancecompany",
+      "tpa",
+    ]);
+
+    return { ipdBills: rows, statusWiseTotals: typeTotals };
+  } catch (error) {
+    console.error("Error in getIPDBillsV4:", error);
     throw error;
   }
 };
@@ -1001,15 +1137,123 @@ const getIHXData = async (req) => {
   }
 };
 
+/**
+ * getStatuswiseIPDDueListV2 — V1 with correctly resolved insurer and TPA names.
+ *
+ * V1 is untouched and still serves anything already calling it.
+ *
+ * ⚠️ WHY THE JOIN HAD TO GO
+ * ─────────────────────────
+ * V1 does `LEFT JOIN insurance_company ic ON ic.comapny_id = i.insurancecompany`
+ * against the BRANCH table. From 01 Jul 2026 invoice.insurancecompany holds an
+ * id from the MASTER insuranceMasterData instead, and the two id spaces are
+ * unrelated — so that join silently returns NULL for every recent invoice, or
+ * worse, matches a different company that happens to share the id.
+ *
+ * The join is dropped and the raw ids are selected instead; addCompanyNames
+ * routes each row by its own creation_date and adds
+ * insurancecompany_name / tpa_name. A range spanning the cutover gets both
+ * maps, which a single join can never do.
+ */
+const getStatuswiseIPDDueListV2 = async (req) => {
+  const { connection } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  const { status = "" } = req.query;
+  const hasStatusFilter = status && status.trim() !== "";
+
+  try {
+    const rows = await new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) {
+          if (tempCon) tempCon.release();
+          return reject(err);
+        }
+
+        let sql = `
+          SELECT
+              i.invoice_id,
+              i.patient_id,
+              p.name,
+              p.phone,
+              i.status,
+              i.creation_date,
+              i.totalamt,
+              i.totaldue,
+              i.insurancecompany,
+              i.tpa,
+              CASE
+                WHEN DATEDIFF(CURDATE(), DATE(i.creation_date)) > 90 THEN '>90 days'
+                WHEN DATEDIFF(CURDATE(), DATE(i.creation_date)) > 60 THEN '>60 days'
+                WHEN DATEDIFF(CURDATE(), DATE(i.creation_date)) > 30 THEN '>30 days'
+                ELSE '<30 days'
+              END AS due_category
+          FROM invoice i
+          JOIN patient p ON p.patient_id = i.patient_id
+          WHERE i.is_deleted != 1
+            AND i.creation_date >= '2025-04-01'
+            AND i.totaldue > 0
+        `;
+
+        const params = [];
+        if (hasStatusFilter) {
+          sql += ` AND i.status = ?`;
+          params.push(status);
+        }
+
+        sql += ` ORDER BY i.creation_date ASC`;
+
+        tempCon.query(sql, params, (error, result) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(result);
+        });
+      });
+    });
+
+    // Insurer and TPA share one id space and one cutover, so both resolve in a
+    // single pass against one pair of maps.
+    await addCompanyNames(rows, connection, "creation_date", [
+      "insurancecompany",
+      "tpa",
+    ]);
+
+    // Same grouped envelope V1 returns, so the screen only changes its URL.
+    const grouped = {};
+    for (const row of rows) {
+      const key = row.due_category;
+      if (!grouped[key]) grouped[key] = { patients: [], totalDue: 0 };
+      grouped[key].patients.push({
+        ...row,
+        // V1 aliased the joined column as `companyname`. Kept so anything
+        // reading that key keeps working.
+        companyname: row.insurancecompany_name,
+      });
+      grouped[key].totalDue += Number(row.totaldue) || 0;
+    }
+    return grouped;
+  } catch (error) {
+    console.error("Error in getStatuswiseIPDDueListV2:", error);
+    throw error;
+  }
+};
+
 module.exports = {
   getIPDCollection,
   getIPDCollectionV2,
   getIPDCollectionV3,
+  getStatuswiseIPDDueListV2,
   getTotalIPDCollection,
   getIPDBills,
   getIPDDueList,
   getIPDBillsV2,
   getIPDBillsV3,
+  getIPDBillsV4,
   getStatuswiseIPDDueList,
   getIPDTotalSummary,
   getIHXData,

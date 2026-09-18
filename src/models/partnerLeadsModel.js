@@ -64,6 +64,61 @@ const clean = (v) => {
   return s === "" ? null : s;
 };
 
+/* ── Hexa branch mapping ──────────────────────────────────────────────────── */
+
+/**
+ * hexa_leads.area_name now carries the branch, so Hexa CAN be scoped to a
+ * location — sulekha_leads still cannot (see the header note).
+ *
+ * Hexa writes its own area names and they do not all match the branch names the
+ * app stores. Keys are APP branch names; values are area_name values as Hexa
+ * writes them. Matched case- and punctuation-insensitively.
+ *
+ * Confirmed so far:
+ *   Chinchwad -> "Pimpri-Chinchwad"
+ *
+ * ⚠️ Everything else relies on the containment fallback below. Run
+ * getUnmappedHexaAreas() after deploying — every area_name it returns is a real
+ * lead that no branch will ever see.
+ */
+const HEXA_AREA_ALIASES = {
+  Chinchwad: ["Pimpri-Chinchwad", "Pimpri Chinchwad", "Pimpri & Chinchwad"],
+};
+
+// Lowercase, strip everything that is not a letter or digit. "Pimpri-Chinchwad",
+// "pimpri chinchwad" and "Pimpri & Chinchwad" all collapse to the same key.
+const normArea = (v) =>
+  String(v ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+/**
+ * Does this area_name belong to this branch?
+ *
+ *   1. an alias, matched exactly after normalising
+ *   2. the branch name itself, matched exactly
+ *   3. the area CONTAINS the branch name ("baner balewadi" for Baner)
+ *
+ * Containment runs ONE WAY only. The reverse — branch contains area — would
+ * make an area of "nagar" match both Rajaji Nagar and Sahakar Nagar, and a
+ * lead landing in two branches is worse than one landing in none, because
+ * nobody would ever notice.
+ */
+function hexaBelongsTo(areaName, location) {
+  const area = normArea(areaName);
+  if (!area) return false;
+
+  const branch = normArea(location);
+  if (!branch) return false;
+
+  const aliases = (HEXA_AREA_ALIASES[location] || []).map(normArea);
+  if (aliases.includes(area)) return true;
+
+  if (area === branch) return true;
+
+  return area.includes(branch);
+}
+
 /* ── fetch + normalise ────────────────────────────────────────────────────── */
 
 async function fetchSulekha(query, from, to) {
@@ -90,26 +145,36 @@ async function fetchSulekha(query, from, to) {
     note: clean(r.note),
     date: r.created_at,
     // Hexa-only fields, present as null so the row shape is uniform.
+    // Hexa-only fields, present as null so the row shape is uniform.
     gender: null,
     procedure_name: null,
     medical_condition: null,
     department: null,
+    message: null,
     _phone: normPhone(r.user_mobile),
   }));
 }
 
-async function fetchHexa(query, from, to) {
+async function fetchHexa(query, from, to, location) {
   const rows = await query(
     `SELECT id, name, country_code, phoneno, email, gender,
             procedure_name, medical_condition, department, city_name,
-            note, lead_datetime
+            area_name, message, note, lead_datetime
        FROM hexa_leads
       WHERE DATE(lead_datetime) BETWEEN ? AND ?
       ORDER BY lead_datetime DESC`,
     [from, to],
   );
 
-  return rows.map((r) => ({
+  // Filtered in Node rather than SQL. The alias and containment rules are the
+  // same ones the app has to apply, and a LIKE '%branch%' in the query would
+  // silently drop every aliased area — Chinchwad's "Pimpri-Chinchwad" among
+  // them. Row counts here are small enough that the extra pass costs nothing.
+  const scoped = location
+    ? rows.filter((r) => hexaBelongsTo(r.area_name, location))
+    : rows;
+
+  return scoped.map((r) => ({
     lead_key: `HEX-${r.id}`,
     appointment_id: r.id,
     source: "Hexa",
@@ -120,9 +185,16 @@ async function fetchHexa(query, from, to) {
     ),
     email: clean(r.email),
     city: clean(r.city_name),
+    // The branch Hexa assigned, as written. Shown on the card so a
+    // mis-assignment is visible rather than invisible.
+    area: clean(r.area_name),
     // hexa_leads has no status column — see header note.
     status: null,
     note: clean(r.note),
+    // What the enquirer actually typed. `note` is what staff wrote afterwards —
+    // two different things, so they stay separate fields rather than one being
+    // folded into the other.
+    message: clean(r.message),
     date: r.lead_datetime,
     gender: clean(r.gender),
     procedure_name: clean(r.procedure_name),
@@ -209,7 +281,10 @@ async function getPartnerLeads(location, fromDate, toDate, source) {
 
         const [sulekha, hexa] = await Promise.all([
           wanted === "hexa" ? [] : fetchSulekha(query, fromDate, toDate),
-          wanted === "sulekha" ? [] : fetchHexa(query, fromDate, toDate),
+          // Sulekha has no branch column and stays global; Hexa is now scoped.
+          wanted === "sulekha"
+            ? []
+            : fetchHexa(query, fromDate, toDate, location),
         ]);
 
         tempCon.release();
@@ -276,4 +351,46 @@ async function getPartnerLeads(location, fromDate, toDate, source) {
   });
 }
 
-module.exports = { getPartnerLeads };
+/**
+ * area_name values that no branch can claim.
+ *
+ * Every row returned is a real Hexa lead sitting in the table that nobody will
+ * ever be shown. Run it after deploying and whenever Hexa adds an area.
+ *
+ *   const rows = await getUnmappedHexaAreas(locations);
+ */
+async function getUnmappedHexaAreas(
+  knownBranches = [],
+  from = null,
+  to = null,
+) {
+  const { connection: leadDB } = getConnectionByLocation("lead");
+  if (!leadDB) throw new Error("lead database unavailable");
+
+  const where = from && to ? "WHERE DATE(lead_datetime) BETWEEN ? AND ?" : "";
+  const params = from && to ? [from, to] : [];
+
+  return new Promise((resolve, reject) => {
+    leadDB.getConnection((err, tempCon) => {
+      if (err) return reject(err);
+      tempCon.query(
+        `SELECT area_name, COUNT(*) AS leads, MAX(lead_datetime) AS latest
+           FROM hexa_leads ${where}
+          GROUP BY area_name
+          ORDER BY leads DESC`,
+        params,
+        (error, rows) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(
+            rows.filter(
+              (r) => !knownBranches.some((b) => hexaBelongsTo(r.area_name, b)),
+            ),
+          );
+        },
+      );
+    });
+  });
+}
+
+module.exports = { getPartnerLeads, getUnmappedHexaAreas, HEXA_AREA_ALIASES };

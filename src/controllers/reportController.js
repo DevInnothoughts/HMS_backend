@@ -10,6 +10,7 @@ const {
   generateSummaryReport,
   generateDSRForDate,
   getDSRData,
+  generateSummaryReportV2,
 } = require("../models/reportMailModel");
 const {
   generateIPDDueEmail,
@@ -162,6 +163,17 @@ router.post("/lost-leads/data", async (req, res) => {
   } catch (err) {
     console.error("Lost leads error:", err);
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+router.get("/summaryReportV2", async (req, res, next) => {
+  try {
+    res
+      .status(200)
+      .send(await generateSummaryReportV2(req.query.from, req.query.to));
+  } catch (err) {
+    console.error("summaryReportV2:", err.message);
+    next(err);
   }
 });
 

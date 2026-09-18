@@ -113,6 +113,7 @@ function mapFields(payload) {
     medical_condition: trim(pick(payload, "condition", "ailment"), 255),
     department: trim(pick(payload, "department", "dept"), 255),
     city_name: trim(pick(payload, "cityName", "city", "city_name"), 120),
+    area_name: trim(pick(payload, "areaName", "area", "area_name"), 120),
     message: trim(
       pick(payload, "query", "message", "comments", "remarks"),
       4000,
@@ -138,6 +139,7 @@ function buildDedupKey(payload, fields) {
     fields.medical_condition,
     fields.department,
     fields.city_name,
+    fields.area_name,
     fields.message,
   ]
     .map((v) => (v == null ? "" : String(v).trim().toLowerCase()))
@@ -196,9 +198,9 @@ async function saveHexaLead(payload) {
   const result = await run(
     `INSERT INTO hexa_leads
        (name, country_code, phoneno, email, gender, procedure_name,
-        medical_condition, department, city_name, message,
+        medical_condition, department, city_name, area_name, message,
         dedup_key, lead_datetime, raw_payload)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
        name              = VALUES(name),
        country_code      = VALUES(country_code),
@@ -209,6 +211,7 @@ async function saveHexaLead(payload) {
        medical_condition = VALUES(medical_condition),
        department        = VALUES(department),
        city_name         = VALUES(city_name),
+       area_name         = VALUES(area_name),
        message           = VALUES(message),
        raw_payload       = VALUES(raw_payload),
        received_count    = received_count + 1`,
@@ -222,6 +225,7 @@ async function saveHexaLead(payload) {
       fields.medical_condition,
       fields.department,
       fields.city_name,
+      fields.area_name,
       fields.message,
       dedupKey,
       leadDatetime,

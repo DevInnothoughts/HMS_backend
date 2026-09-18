@@ -73,6 +73,28 @@ const getOPDIPDCollection = async (req) => {
   }
 };
 
+/**
+ * Day key as the LOCAL calendar date.
+ *
+ * ⚠️ NOT toISOString(). That converts to UTC, and IST is +5:30 — so a payment
+ * at 02:00 on the 11th becomes 20:30 on the 10th, and a column the driver
+ * hands back as a midnight Date shifts a whole day. That is why IPD was
+ * landing one row above OPD for the same day.
+ *
+ * OPD's item_date is a plain DATE string and never went through new Date(),
+ * which is why only the IPD side moved.
+ */
+const dateKey = (v) => {
+  if (!v) return "";
+  // Already 'YYYY-MM-DD' or 'YYYY-MM-DD HH:mm:ss' — take it as written. No
+  // parsing means no timezone to get wrong.
+  if (typeof v === "string") return v.slice(0, 10);
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
 const getMergedData = async (connection, fromDate, toDate) => {
   try {
     const executeQuery = (query, params) => {
@@ -135,10 +157,14 @@ const getMergedData = async (connection, fromDate, toDate) => {
 
     // Process OPD data
     opdResults.forEach((opd) => {
-      const dateKey = opd.date; // No need to split, date is already correct
-      if (!mergedData[dateKey]) {
-        mergedData[dateKey] = {
-          date: dateKey,
+      // Through the same helper as IPD. item_date is a DATE column, which the
+      // driver returns as a Date OBJECT — used as a key it stringifies to
+      // "Wed Sep 10 2026 …" while the IPD side produces "2026-09-10", so the
+      // same day lands in two separate buckets.
+      const key = dateKey(opd.date);
+      if (!mergedData[key]) {
+        mergedData[key] = {
+          date: key,
           opd_cash: opd.total_cash || 0,
           opd_card: opd.total_card || 0,
           opd_online: opd.total_online || 0,
@@ -160,10 +186,10 @@ const getMergedData = async (connection, fromDate, toDate) => {
 
     // Process IPD data
     ipdResults.forEach((ipd) => {
-      const dateKey = new Date(ipd.date).toISOString().split("T")[0]; // new Date(ipd.date).toLocaleDateString("en-CA"); // No need to split, date is already correct
-      if (!mergedData[dateKey]) {
-        mergedData[dateKey] = {
-          date: dateKey,
+      const key = dateKey(ipd.date);
+      if (!mergedData[key]) {
+        mergedData[key] = {
+          date: key,
           opd_cash: 0,
           opd_card: 0,
           opd_online: 0,
@@ -173,10 +199,10 @@ const getMergedData = async (connection, fromDate, toDate) => {
           ipd_discount: ipd.total_discountamt || 0,
         };
       } else {
-        mergedData[dateKey].ipd_cash += ipd.total_cashamt || 0;
-        mergedData[dateKey].ipd_card += ipd.total_cardamt || 0;
-        mergedData[dateKey].ipd_online += ipd.total_onlineamt || 0;
-        mergedData[dateKey].ipd_discount += ipd.total_discountamt || 0;
+        mergedData[key].ipd_cash += ipd.total_cashamt || 0;
+        mergedData[key].ipd_card += ipd.total_cardamt || 0;
+        mergedData[key].ipd_online += ipd.total_onlineamt || 0;
+        mergedData[key].ipd_discount += ipd.total_discountamt || 0;
       }
 
       // Update overall IPD totals
@@ -526,9 +552,186 @@ const getOPDCollectionV3 = async (req) => {
   }
 };
 
+/**
+ * getMergedDataV2 — getMergedData plus cheque.
+ *
+ * ⚠️ WHY A V2 AND NOT AN EDIT
+ * ───────────────────────────
+ * Both payloads are POSITIONAL. Adding cheque shifts every index after it:
+ *   V1 row: [cash, card, online, discount]
+ *   V2 row: [cash, card, online, cheque, discount]
+ *
+ * src/admin/OPDIPDApproval.js reads V1's shape with a fixed 4-column table and
+ * a 5-label Col for the summary. Feeding it a 5-element row would render an
+ * unlabelled column, and a 6-row summary against 5 labels would misalign every
+ * line. So V1 stays exactly as it is.
+ *
+ * ⚠️ OPD CHEQUE
+ * ─────────────
+ * patient_itemreceipt.payment_mode does carry 'Cheque' — the OPD Collection
+ * report sums it — but getMergedData never had a branch for it, so those
+ * receipts were silently absent from this screen's OPD column.
+ */
+const getMergedDataV2 = async (connection, fromDate, toDate) => {
+  const executeQuery = (query, params) =>
+    new Promise((resolve, reject) => {
+      connection.query(query, params, (error, results) =>
+        error ? reject(error) : resolve(results),
+      );
+    });
+
+  const sql1 = `
+    SELECT 
+      ip.item_date AS date,
+      SUM(CASE WHEN ip.payment_mode = 'Cash'   THEN ip.total ELSE 0 END) AS total_cash,
+      SUM(CASE WHEN ip.payment_mode = 'Card'   THEN ip.total ELSE 0 END) AS total_card,
+      SUM(CASE WHEN ip.payment_mode IN ('Online', 'UPI') THEN ip.total ELSE 0 END) AS total_online,
+      SUM(CASE WHEN ip.payment_mode = 'Cheque' THEN ip.total ELSE 0 END) AS total_cheque
+    FROM patient_itemreceipt ip
+    JOIN patient p ON ip.patient_id = p.patient_id
+    WHERE ip.is_deleted != 1
+      AND ip.item_date >= ?  
+      AND ip.item_date <= ?
+    GROUP BY ip.item_date
+    ORDER BY ip.item_date ASC
+  `;
+
+  const sql2 = `
+    SELECT 
+      DATE(ip.receipt_date) AS date,
+      SUM(ip.cashamt)     AS total_cashamt,
+      SUM(ip.cardamt)     AS total_cardamt,
+      SUM(ip.onlineamt)   AS total_onlineamt,
+      SUM(ip.chequeamt)   AS total_chequeamt,
+      SUM(ip.discountamt) AS total_discountamt
+    FROM ipd_payment ip
+    WHERE DATE(ip.receipt_date) >= ?  
+      AND DATE(ip.receipt_date) <= ?
+    GROUP BY DATE(ip.receipt_date)
+    ORDER BY DATE(ip.receipt_date) ASC
+  `;
+
+  const [opdResults, ipdResults] = await Promise.all([
+    executeQuery(sql1, [fromDate, toDate]),
+    executeQuery(sql2, [fromDate, toDate]),
+  ]);
+
+  const mergedData = {};
+  let o_cash = 0,
+    o_card = 0,
+    o_online = 0,
+    o_cheque = 0;
+  let i_cash = 0,
+    i_card = 0,
+    i_online = 0,
+    i_cheque = 0,
+    i_discount = 0;
+
+  const blank = (key) => ({
+    date: key,
+    opd_cash: 0,
+    opd_card: 0,
+    opd_online: 0,
+    opd_cheque: 0,
+    ipd_cash: 0,
+    ipd_card: 0,
+    ipd_online: 0,
+    ipd_cheque: 0,
+    ipd_discount: 0,
+  });
+
+  opdResults.forEach((opd) => {
+    // Through dateKey, same as the IPD side. item_date is a DATE column, which
+    // the driver returns as a Date OBJECT — used as a key it stringifies to
+    // "Wed Sep 10 2026 …" while the IPD side produces "2026-09-10", and the
+    // same day lands in two separate buckets.
+    const key = dateKey(opd.date);
+    if (!mergedData[key]) mergedData[key] = blank(key);
+    mergedData[key].opd_cash += opd.total_cash || 0;
+    mergedData[key].opd_card += opd.total_card || 0;
+    mergedData[key].opd_online += opd.total_online || 0;
+    mergedData[key].opd_cheque += opd.total_cheque || 0;
+    o_cash += opd.total_cash || 0;
+    o_card += opd.total_card || 0;
+    o_online += opd.total_online || 0;
+    o_cheque += opd.total_cheque || 0;
+  });
+
+  ipdResults.forEach((ipd) => {
+    const key = dateKey(ipd.date);
+    if (!mergedData[key]) mergedData[key] = blank(key);
+    mergedData[key].ipd_cash += ipd.total_cashamt || 0;
+    mergedData[key].ipd_card += ipd.total_cardamt || 0;
+    mergedData[key].ipd_online += ipd.total_onlineamt || 0;
+    mergedData[key].ipd_cheque += ipd.total_chequeamt || 0;
+    mergedData[key].ipd_discount += ipd.total_discountamt || 0;
+    i_cash += ipd.total_cashamt || 0;
+    i_card += ipd.total_cardamt || 0;
+    i_online += ipd.total_onlineamt || 0;
+    i_cheque += ipd.total_chequeamt || 0;
+    i_discount += ipd.total_discountamt || 0;
+  });
+
+  // Rows: Cash, Card, Online, Cheque, Discount, Total — the screen's MODE_ORDER
+  // must match this exactly, since the payload carries no labels.
+  const overallCollection = [
+    [i_cash, o_cash],
+    [i_card, o_card],
+    [i_online, o_online],
+    [i_cheque, o_cheque],
+    [i_discount, 0],
+    [
+      i_cash + i_card + i_online + i_cheque - i_discount,
+      o_cash + o_card + o_online + o_cheque,
+    ],
+  ];
+
+  const transformedData = Object.values(mergedData).map((item) => {
+    const {
+      date,
+      ipd_cash,
+      ipd_card,
+      ipd_online,
+      ipd_cheque,
+      ipd_discount,
+      opd_cash,
+      opd_card,
+      opd_online,
+      opd_cheque,
+    } = item;
+    return [
+      date,
+      [
+        [ipd_cash, ipd_card, ipd_online, ipd_cheque, ipd_discount],
+        [opd_cash, opd_card, opd_online, opd_cheque, 0],
+        [
+          ipd_cash + opd_cash,
+          ipd_card + opd_card,
+          ipd_online + opd_online,
+          ipd_cheque + opd_cheque,
+          ipd_discount,
+        ],
+      ],
+    ];
+  });
+
+  return { transformedData, overallCollection };
+};
+
+const getOPDIPDCollectionV2 = async (req) => {
+  const { connection } = getConnectionByLocation(req.query.location);
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+  return await getMergedDataV2(connection, req.query.from, req.query.to);
+};
+
 module.exports = {
   getOPDCollection,
   getOPDIPDCollection,
   getOPDCollectionV2,
   getOPDCollectionV3,
+  getOPDIPDCollectionV2,
 };

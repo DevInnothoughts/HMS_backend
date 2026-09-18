@@ -6,6 +6,7 @@ const {
   getOPDIPDCollection,
   getOPDCollectionV2,
   getOPDCollectionV3,
+  getOPDIPDCollectionV2,
 } = require("../models/opdCollectionModel");
 
 const { getCollectionV4 } = require("../models/labCollectionModel");
@@ -33,6 +34,11 @@ router.get("/getTotal", async (req, res, next) => {
     next(err);
   }
 });
+router.get("/getTotalV2", (req, res, next) =>
+  getOPDIPDCollectionV2(req)
+    .then((d) => res.json(d))
+    .catch(next),
+);
 
 router.get("/v2", async (req, res, next) => {
   console.log(req.query.location);

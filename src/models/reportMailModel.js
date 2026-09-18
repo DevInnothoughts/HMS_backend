@@ -55,6 +55,9 @@ const locations = [
   "Kalyan",
   "Bopal",
   "Electronic City",
+  "Adajan",
+  "RR Nagar",
+  "Raipur",
 ];
 
 // Execute query helper
@@ -1191,6 +1194,101 @@ async function getCollectionsForDateRange(location, fromDate, toDate) {
   };
 }
 
+// Visits and new visits in one pass, so the two can never disagree about which
+// rows are confirmed. Same definition as the Reports section's cards:
+// non-deleted, CONFIRMED appointments in the range.
+//
+// ⚠️ This counts VISITS, not people — a patient who came twice counts twice,
+// and the average is therefore per visit. That is the right denominator for
+// "what does a visit earn us", which is what the card answers.
+const COUNTS_SQL = `
+  SELECT
+    COUNT(*)                                          AS visits,
+    COUNT(CASE WHEN patient_type = 'New' THEN 1 END)  AS newVisits
+  FROM appointment
+  WHERE appointment_timestamp >= ? AND appointment_timestamp <= ?
+    AND is_deleted != 1
+    AND confirm_time != 0
+`;
+
+const countsFor = (location, from, to) =>
+  new Promise((resolve) => {
+    const { connection } = getConnectionByLocation(location);
+    if (!connection) return resolve({ visits: 0, newVisits: 0 });
+
+    connection.query(
+      COUNTS_SQL,
+      [`${from} 00:00:00`, `${to} 23:59:59`],
+      (err, rows) => {
+        if (err) {
+          // A branch that fails its count still keeps its money figures — the
+          // averages simply go blank for that row rather than the whole
+          // report failing.
+          console.error(
+            `summaryReport counts failed for ${location}:`,
+            err.message,
+          );
+          return resolve({ visits: null, newVisits: null });
+        }
+        resolve({
+          visits: Number(rows?.[0]?.visits) || 0,
+          newVisits: Number(rows?.[0]?.newVisits) || 0,
+        });
+      },
+    );
+  });
+
+/**
+ * generateSummaryReportV2 — V1 plus patient counts and per-patient averages.
+ *
+ * generateSummaryReport is untouched. V2 returns its exact envelope with
+ * `visits`, `newVisits`, `avgPerPatient` and `avgPerNewPatient` added to each
+ * branch and to summary, so a V1 consumer is unaffected.
+ *
+ * ⚠️ Same signature as V1 — plain dates, NOT a request object. V1 already
+ * walks every branch serially; this adds one more query per branch on top, so
+ * it is the slowest call in the app by some margin.
+ */
+async function generateSummaryReportV2(fromDate, toDate) {
+  const base = await generateSummaryReport(fromDate, toDate);
+
+  const branches = base?.branches || [];
+  const BATCH = 4;
+
+  for (let i = 0; i < branches.length; i += BATCH) {
+    const slice = branches.slice(i, i + BATCH);
+    await Promise.all(
+      slice.map(async (b) => {
+        if (b.error) return; // unreachable branch — leave it alone
+        const c = await countsFor(b.location, fromDate, toDate);
+        b.visits = c.visits;
+        b.newVisits = c.newVisits;
+        const total = Number(b.grandTotal) || 0;
+        b.avgPerPatient = c.visits > 0 ? Math.round(total / c.visits) : null;
+        b.avgPerNewPatient =
+          c.newVisits > 0 ? Math.round(total / c.newVisits) : null;
+      }),
+    );
+  }
+
+  // Group figures are summed from the branches that reported, NOT recomputed
+  // from a separate query — so the cards and the rows always agree.
+  const ok = branches.filter((b) => !b.error && b.visits != null);
+  const visits = ok.reduce((a, b) => a + b.visits, 0);
+  const newVisits = ok.reduce((a, b) => a + b.newVisits, 0);
+  const total = Number(base?.summary?.grandTotal) || 0;
+
+  if (base?.summary) {
+    base.summary.visits = visits;
+    base.summary.newVisits = newVisits;
+    base.summary.avgPerPatient = visits > 0 ? Math.round(total / visits) : null;
+    base.summary.avgPerNewPatient =
+      newVisits > 0 ? Math.round(total / newVisits) : null;
+  }
+
+  return base;
+}
+
 module.exports = {
   generateAndSendReport,
   generateSummaryReport,
@@ -1198,4 +1296,5 @@ module.exports = {
   getDSRData,
   generateDSRRangeExcel,
   getLocationSummary,
+  generateSummaryReportV2,
 };

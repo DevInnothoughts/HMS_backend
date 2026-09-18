@@ -8,11 +8,13 @@ const {
   getIPDDueList,
   getIPDBillsV2,
   getStatuswiseIPDDueList,
+  getStatuswiseIPDDueListV2,
   getIPDTotalSummary,
   getIPDCollectionV2,
   getIPDCollectionV3,
   getIPDBillsV3,
   getIHXData,
+  getIPDBillsV4,
 } = require("../models/ipdCollectionModel");
 
 router.get("/", async (req, res, next) => {
@@ -122,6 +124,12 @@ router.get("/billsV3", async (req, res, next) => {
   }
 });
 
+router.get("/billsV4", (req, res, next) =>
+  getIPDBillsV4(req)
+    .then((d) => res.json(d))
+    .catch(next),
+);
+
 router.get("/ipdTotalSummary", async (req, res, next) => {
   console.log(req.query.location);
   console.log(req.query.from);
@@ -145,5 +153,11 @@ router.get("/ihxData", async (req, res, next) => {
     next(err);
   }
 });
+
+router.get("/statuswiseDueList/v2", (req, res, next) =>
+  getStatuswiseIPDDueListV2(req)
+    .then((d) => res.json(d))
+    .catch(next),
+);
 
 module.exports = router;

@@ -80,6 +80,10 @@ const { getConnectionByLocation } = require("../databaseUtils");
 
 // Same four branches, same order as the other Jan–Jun workbooks.
 const DEFAULT_LOCATIONS = [
+  "Andheri",
+  "Navi Mumbai",
+  "Thane",
+  "Vashi",
   "HSR",
   "Indiranagar",
   "JP Nagar",
@@ -108,7 +112,7 @@ const LOCATIONS = argLocations.length ? argLocations : DEFAULT_LOCATIONS;
 const YEAR = Number(process.argv[3]) || 2026;
 const PREVIOUS_YEAR = YEAR - 1;
 const START_MONTH = Number(process.argv[4]) || 1;
-const END_MONTH = Number(process.argv[5]) || 7; // ← July
+const END_MONTH = Number(process.argv[5]) || 8; // ← August
 
 /* ── Shared helpers (same conventions as the other report models) ─────────── */
 

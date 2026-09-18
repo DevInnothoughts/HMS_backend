@@ -32,6 +32,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { isSurgeryAdvised } = require("./adviceUtils");
 
 const CONFIG = {
   // Column on `invoice` treated as IPD revenue (gross). Hardcoded constant
@@ -145,13 +146,6 @@ function aggregateDoctors(rows, idKey, nameKey, ctx) {
     d.patientIds.add(row.patient_id);
     if (newPatientIds.has(row.patient_id)) d.newPatientIds.add(row.patient_id);
 
-    // Advice classification — anything that isn't "medication" counts as Surgery.
-    const advice = (row.diagnosisAdvice || "")
-      .toString()
-      .replace(/,$/, "")
-      .trim()
-      .toLowerCase();
-
     // Assign each patient to ONE speciality (latest diagnosis wins — rows are
     // ordered by date_diagnosis). Covers every diagnosed patient, so the
     // per-speciality counts sum to patientsDiagnosed. Carry the latest advice
@@ -161,7 +155,7 @@ function aggregateDoctors(rows, idKey, nameKey, ctx) {
     const provisional = parseProvisional(row.provisionalDiagnosis);
     d.patientSpeciality.set(row.patient_id, {
       speciality,
-      surgeryAdvised: advice !== "medication",
+      surgeryAdvised: isSurgeryAdvised(row.diagnosisAdvice),
       subTypes: subTypesFor(provisional, speciality),
     });
   }
