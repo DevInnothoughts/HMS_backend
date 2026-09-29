@@ -426,6 +426,84 @@ async function getIVRLeadsCount(location, fromDate, toDate) {
   });
 }
 
+// ─── Lead COUNTS only (Home screen) ───────────────────────────────────────────
+//
+// Each count matches the list screen it opens:
+//   web, chatbot — one per phone, like the Web / Bot Leads screens
+//   ivr          — EVERY call, like the IVR Calls screen (a number that rang
+//                  twice is two calls)
+// No clinic-DB visit/IPD lookups, which are most of the cost.
+
+const uniquePhones = (rows, field) => {
+  const seen = new Set();
+  for (const r of rows) {
+    seen.add(r[field]?.replace(/^(\+91|91|0)/, "") || "");
+  }
+  return seen.size;
+};
+
+async function getLocationLeadCounts(location, fromDate, toDate) {
+  const { connection: leadDB } = getConnectionByLocation("lead");
+  const { connection: clinicDB } = getConnectionByLocation(location);
+  if (!leadDB || !clinicDB) {
+    const err = new Error(`Invalid location: ${location}`);
+    err.status = 404;
+    throw err;
+  }
+
+  const leadQuery = util.promisify(leadDB.query).bind(leadDB);
+  const clinicQuery = util.promisify(clinicDB.query).bind(clinicDB);
+
+  const dateFrom = `${fromDate}T00:00:00+05:30`;
+  const dateTo = `${toDate}T23:59:59+05:30`;
+  const area = buildAreaWhere(location);
+  const branch = buildBranchWhere(location);
+
+  const [webRows, botRows, ivrRows] = await Promise.all([
+    leadQuery(
+      `SELECT phoneno FROM appointments
+        WHERE ${area.whereClause} AND date BETWEEN ? AND ?`,
+      [...area.params, dateFrom, dateTo],
+    ),
+    leadQuery(
+      `SELECT contact AS phoneno FROM chatbot_leads
+        WHERE ${branch.whereClause} AND DATE(datetime) BETWEEN ? AND ?`,
+      [...branch.params, dateFrom, dateTo],
+    ),
+    getIVRCallCount(location, fromDate, toDate, clinicQuery),
+  ]);
+
+  return {
+    web: uniquePhones(webRows, "phoneno"),
+    chatbot: uniquePhones(botRows, "phoneno"),
+    ivr: ivrRows,
+  };
+}
+
+/**
+ * Every IVR call in the range — the same filter as the IVR Calls screen
+ * (ivrCallModel: call_date in range, destination_no != ''), not de-duplicated.
+ */
+async function getIVRCallCount(location, fromDate, toDate, clinicQuery) {
+  let q = clinicQuery;
+  if (!q) {
+    const { connection: clinicDB } = getConnectionByLocation(location);
+    if (!clinicDB) {
+      const err = new Error(`Invalid location: ${location}`);
+      err.status = 404;
+      throw err;
+    }
+    q = util.promisify(clinicDB.query).bind(clinicDB);
+  }
+  const rows = await q(
+    `SELECT COUNT(*) AS n FROM IVRdata
+      WHERE STR_TO_DATE(call_date, '%Y-%d-%m') BETWEEN ? AND ?
+        AND destination_no != ''`,
+    [fromDate, toDate],
+  );
+  return Number(rows?.[0]?.n) || 0;
+}
+
 // ─── All locations ────────────────────────────────────────────────────────────
 
 async function getAllLocationsStats(fromDate, toDate) {
@@ -439,6 +517,8 @@ module.exports = {
   getWebLeadsCount,
   getChatbotLeadsCount,
   getLocationStats,
+  getLocationLeadCounts,
+  getIVRCallCount,
   getAllLocationsStats,
   getIVRLeadsCount,
   buildAreaWhere, // ← add

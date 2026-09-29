@@ -25,6 +25,7 @@
 
 const { getLocationSummary } = require("./reportMailModel");
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { countedSql } = require("./utils/interbranch");
 const { financialYearOf } = require("./branchTargetModel");
 const { getTargetValueMaps } = require("./branchTargetValueNewModel");
 const { getMonthlyActuals } = require("./branchMonthlyActualNewModel");
@@ -134,6 +135,11 @@ const DEFAULT_LOCATIONS = [
   "Kalyan",
   "Bopal",
   "Electronic City",
+  // Added with the three new branches — missing here meant the "all
+  // branches" fallback (no locations sent) never included them.
+  "RR Nagar",
+  "Adajan",
+  "Raipur",
 ];
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -150,6 +156,52 @@ const makeRunner =
         err ? reject(err) : resolve(rows),
       ),
     );
+
+// ─── TARGET ROW LOOKUP ────────────────────────────────────────────────────────
+// branch_target_value rows are keyed by branch_name exactly as typed into the
+// table. A new branch entered as "RR nagar" or "Adajan " never matched the app's
+// "RR Nagar" / "Adajan", so it was treated as having no target at all. Match
+// case- and space-insensitively and re-key under the app's own name.
+const normName = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+function alignTargetMaps(maps, locations) {
+  for (const set of ["B", "O"]) {
+    const m = maps[set] || {};
+    const byNorm = {};
+    for (const k of Object.keys(m)) byNorm[normName(k)] = m[k];
+    for (const loc of locations) {
+      if (!m[loc] && byNorm[normName(loc)]) m[loc] = byNorm[normName(loc)];
+    }
+    maps[set] = m;
+  }
+  return maps;
+}
+
+/**
+ * The yearly TOTAL (revenue) target. total_target is entered by hand; for a
+ * newly added branch it is often left empty while the department targets are
+ * filled in, which made that branch's revenue target silently zero. Fall back
+ * to OPD + Lab + IPD revenue + Pharmacy (IPD revenue derived from SX × Avg IPD
+ * when that column is empty too, as targetsForPeriod does).
+ */
+function effectiveTotal(v) {
+  if (!v) return null;
+  if (v.totalTarget != null) return v.totalTarget;
+  const ipd =
+    v.ipdRevenueTarget != null
+      ? v.ipdRevenueTarget
+      : v.sxTarget != null && v.avgIpdTarget != null
+        ? v.sxTarget * v.avgIpdTarget
+        : null;
+  const parts = [v.opdTarget, v.labTarget, ipd, v.pharmacyTarget].filter(
+    (x) => x != null,
+  );
+  return parts.length ? parts.reduce((a, b) => a + b, 0) : null;
+}
 
 // A branch is "configured" if it has a BASE target row (Base is the baseline
 // every user sees; Optimistic is additive on top for SuperAdmin).
@@ -212,7 +264,7 @@ function targetsForPeriod(v, months) {
     pharmacy: scale(v.pharmacyTarget),
     lab: scale(v.labTarget),
     opd: scale(v.opdTarget),
-    total: scale(v.totalTarget),
+    total: scale(effectiveTotal(v)),
   };
 }
 
@@ -236,7 +288,7 @@ function sumTargetValues(list) {
     if (!v) continue;
     acc.newPatientsTarget += v.newPatientsTarget || 0;
     acc.sxTarget += v.sxTarget || 0;
-    acc.totalTarget += v.totalTarget || 0;
+    acc.totalTarget += effectiveTotal(v) || 0;
     acc.ipdWeighted += (v.sxTarget || 0) * (v.avgIpdTarget || 0);
     if (v.ipdRevenueTarget != null) {
       anyIpd = true;
@@ -337,16 +389,35 @@ async function getNewPatientCount(location, from, to) {
   return Number(row?.newpatient) || 0;
 }
 
-async function getIpdInvoiceCount(location, from, to) {
+// IPD invoice count AND total, with the interbranch rule applied (same rule as
+// the IPD Invoice page — utils/interbranch.js). Operating-branch copies of an
+// interbranch invoice belong to the source branch, so they are left out of this
+// branch's SX / IPD revenue and reported separately as `interbranch*`.
+//
+// The total used to come from getLocationSummary().ipdInvoice.total, which
+// counts every invoice; that function is shared with the report mail and
+// other screens, so it is left alone and the IPD figures are taken from here.
+async function getIpdInvoiceActuals(location, from, to) {
   const { connection } = getConnectionByLocation(location);
   if (!connection) throw new Error(`Invalid location: ${location}`);
   const run = makeRunner(connection);
+  const counted = countedSql("i");
   const [row] = await run(
-    `SELECT COUNT(*) AS cnt FROM invoice
-      WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1`,
+    `SELECT
+        SUM(CASE WHEN ${counted} THEN 1 ELSE 0 END)                      AS cnt,
+        COALESCE(SUM(CASE WHEN ${counted} THEN i.totalamt ELSE 0 END), 0) AS total,
+        SUM(CASE WHEN ${counted} THEN 0 ELSE 1 END)                      AS ib_cnt,
+        COALESCE(SUM(CASE WHEN ${counted} THEN 0 ELSE i.totalamt END), 0) AS ib_total
+       FROM invoice i
+      WHERE i.creation_date >= ? AND i.creation_date <= ? AND i.is_deleted != 1`,
     [`${from} 00:00:00`, `${to} 23:59:59`],
   );
-  return Number(row?.cnt) || 0;
+  return {
+    count: Number(row?.cnt) || 0,
+    total: Number(row?.total) || 0,
+    interbranchCount: Number(row?.ib_cnt) || 0,
+    interbranchTotal: Number(row?.ib_total) || 0,
+  };
 }
 
 // Lab revenue for the period, matching dailyOPDModel's lab-collection logic:
@@ -464,9 +535,9 @@ async function getLabRevenue(location, from, to) {
 // THIS-YEAR raw components from the live branch DB.
 async function getThisYearRaw(location, from, to) {
   const summary = await getLocationSummary(location, from, to);
-  const [newPatients, ipdInvoiceCount, labTotal] = await Promise.all([
+  const [newPatients, ipd, labTotal] = await Promise.all([
     getNewPatientCount(location, from, to),
-    getIpdInvoiceCount(location, from, to),
+    getIpdInvoiceActuals(location, from, to),
     // Degrade safely: if the master lookup fails, lab = 0 leaves OPD gross and
     // `total` still correct — only the LAB row under-reports.
     getLabRevenue(location, from, to).catch((e) => {
@@ -477,8 +548,11 @@ async function getThisYearRaw(location, from, to) {
 
   return {
     newPatients,
-    ipdInvoiceTotal: Number(summary?.ipdInvoice?.total) || 0,
-    ipdInvoiceCount,
+    // Interbranch-aware (see getIpdInvoiceActuals) — NOT summary.ipdInvoice.
+    ipdInvoiceTotal: ipd.total,
+    ipdInvoiceCount: ipd.count,
+    ipdInterbranchTotal: ipd.interbranchTotal,
+    ipdInterbranchCount: ipd.interbranchCount,
     pharmacyTotal: Number(summary?.pharmacy?.total) || 0,
     // summary.opd.total includes LAB — net it out so the LAB parameter stands
     // alone and rawToActuals' `opd + ipd + pharmacy + lab` counts it once.
@@ -498,6 +572,8 @@ function sumRaw(list) {
       newPatients: a.newPatients + (r.newPatients || 0),
       ipdInvoiceTotal: a.ipdInvoiceTotal + (r.ipdInvoiceTotal || 0),
       ipdInvoiceCount: a.ipdInvoiceCount + (r.ipdInvoiceCount || 0),
+      ipdInterbranchTotal: a.ipdInterbranchTotal + (r.ipdInterbranchTotal || 0),
+      ipdInterbranchCount: a.ipdInterbranchCount + (r.ipdInterbranchCount || 0),
       pharmacyTotal: a.pharmacyTotal + (r.pharmacyTotal || 0),
       opdTotal: a.opdTotal + (r.opdTotal || 0),
       labTotal: a.labTotal + (r.labTotal || 0),
@@ -506,6 +582,8 @@ function sumRaw(list) {
       newPatients: 0,
       ipdInvoiceTotal: 0,
       ipdInvoiceCount: 0,
+      ipdInterbranchTotal: 0,
+      ipdInterbranchCount: 0,
       pharmacyTotal: 0,
       opdTotal: 0,
       labTotal: 0,
@@ -545,9 +623,11 @@ const getComparisonBranchList = async (opts) => {
   const months = monthsInRange(r.fromTY, r.toTY);
   const showOptimistic = isSuperAdmin(opts.role, opts.subRole);
 
-  const { B: baseMap, O: optMap } = await getTargetValueMaps(fy);
-
   const requested = opts.locations?.length ? opts.locations : DEFAULT_LOCATIONS;
+  const { B: baseMap, O: optMap } = alignTargetMaps(
+    await getTargetValueMaps(fy),
+    requested,
+  );
   const { configured: targets, skipped } = splitByConfigured(
     baseMap,
     requested,
@@ -580,6 +660,14 @@ const getComparisonBranchList = async (opts) => {
           showOptimistic,
           lastYearMissing: (lyRaw._found || 0) === 0,
           targetFellBackToBase: picked.fellBack || undefined,
+          // Interbranch invoices operated here for another branch — NOT in
+          // thisYear (they count at the source branch). Display only.
+          ipdInterbranch: tyRaw.ipdInterbranchCount
+            ? {
+                invoices: tyRaw.ipdInterbranchCount,
+                amount: Math.round(tyRaw.ipdInterbranchTotal || 0),
+              }
+            : undefined,
         };
         if (showOptimistic) {
           const optT = targetsForPeriod(optMap[loc], months);
@@ -633,9 +721,16 @@ const getComparisonDetail = async (opts) => {
   const months = monthsInRange(r.fromTY, r.toTY);
   const showOptimistic = isSuperAdmin(opts.role, opts.subRole);
 
-  const { B: baseMap, O: optMap } = await getTargetValueMaps(fy);
+  const { B: baseMap, O: optMap } = alignTargetMaps(
+    await getTargetValueMaps(fy),
+    [
+      ...(opts.locations?.length ? opts.locations : DEFAULT_LOCATIONS),
+      branchId,
+    ],
+  );
 
-  let branchName, tyRaw, lyRaw, primaryYearly, optYearly;
+  // primarySet was assigned without a declaration (an implicit global).
+  let branchName, tyRaw, lyRaw, primaryYearly, optYearly, primarySet;
   const warnings = [];
 
   if (branchId === "all") {
@@ -756,6 +851,21 @@ const getComparisonDetail = async (opts) => {
       targetPct: prim.targetPct,
       targetSet: primarySet,
     };
+
+    // Interbranch invoices operated at this branch for another branch — not in
+    // thisYear above. Attached for display on the two IPD rows only.
+    if (
+      tyRaw.ipdInterbranchCount &&
+      (p.key === "sx" || p.key === "ipdRevenue" || p.key === "total")
+    ) {
+      row.interbranch = {
+        invoices: tyRaw.ipdInterbranchCount,
+        value:
+          p.key === "sx"
+            ? tyRaw.ipdInterbranchCount
+            : roundByType(p.type, tyRaw.ipdInterbranchTotal),
+      };
+    }
 
     if (showOptimistic) {
       let ot = optP[p.key];

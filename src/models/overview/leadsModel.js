@@ -2,7 +2,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // The Leads & Calls section:
 //   metrics  Leads · Appointments · Visited · IPD conversions
-//   blocks   Source funnel — Website, Chatbot, IVR, Sulekha, Hexa
+//   blocks   Source funnel — IVR, Website, Chatbot, Web call, Aggregator
+//            (always all five, in that order, zeros included)
 //   deltas   optional, against the preceding period of equal length
 //
 // COMPOSED, NOT REWRITTEN
@@ -16,7 +17,9 @@
 // THE FOUR STAGES, AS THE EXISTING MODELS DEFINE THEM
 // ───────────────────────────────────────────────────
 //   Lead        one row in the channel's table, DEDUPLICATED BY PHONE — one
-//               person enquiring three times is one lead
+//               person enquiring three times is one lead. EXCEPT IVR and Web
+//               call, whose lead count is every call / request, so it matches
+//               the IVR Calls and Web Call Leads screens
 //   Appointment status synced to 'Appointment' (web/bot), or a matching
 //               appointment row
 //   Visited     that phone has an appointment with confirm_time != 0 AND
@@ -40,23 +43,33 @@
 // page still carries the raw log.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { getLocationStats } = require("../leadsStatsModel");
-const { getPartnerLeads } = require("../partnerLeadsModel");
+const {
+  getLocationStats,
+  getLocationLeadCounts,
+  getIVRCallCount,
+} = require("../leadsStatsModel");
+const {
+  getPartnerLeads,
+  getPartnerLeadCount,
+} = require("../partnerLeadsModel");
+const { getCallLeadStats, getCallLeadCount } = require("../callLeadsModel");
 const { previousPeriod } = require("./opdModel");
 
 const n0 = (v) => Number(v) || 0;
 
-const CHANNEL_LABELS = {
-  web: "Website",
-  chatbot: "Chatbot",
-  ivr: "IVR",
-};
-
-// The summary names the CATEGORY; the Aggregator Leads screen names the
-// specific partner. So a Hexa row reads "Aggregator" here and "Hexa" there.
-const PARTNER_LABELS = {
-  Hexa: "Aggregator",
-};
+// The dashboard shows these five sources ALWAYS, in this order, even when a
+// source has no leads in the period — a missing row reads as "not set up",
+// a zero row reads as "nothing came in", and only the second is true.
+//
+// "Aggregator" is every partner source together (Sulekha, Hexa, …) — the
+// Aggregator Leads screen splits them by partner.
+const CHANNELS = [
+  { key: "ivr", label: "IVR" },
+  { key: "web", label: "Website" },
+  { key: "chatbot", label: "Chatbot" },
+  { key: "webcall", label: "Web call" },
+  { key: "aggregator", label: "Aggregator" },
+];
 
 /**
  * Partner leads come back as rows, not counts, so they are tallied here.
@@ -85,10 +98,23 @@ function tallyPartner(rows) {
 }
 
 async function gather(location, from, to, detailed) {
-  const [stats, partnerRows] = await Promise.all([
+  const [stats, ivrCalls, callStats, partnerRows] = await Promise.all([
     getLocationStats(location, from, to),
-    // Partner leads are a separate screen and a separate table; a failure
-    // there must not take the three main channels down with it.
+    // IVR "leads" on this dashboard are CALLS, counted like the IVR Calls
+    // screen (every call). getLocationStats counts unique callers, which is
+    // right for the Lead Stats Report but made this row disagree with the
+    // screen it opens.
+    getIVRCallCount(location, from, to).catch((e) => {
+      console.error(`overview/leads: IVR call count failed:`, e.message);
+      return null;
+    }),
+    // Web call leads live in a separate table; a failure there must not take
+    // the other channels down with it — the row just shows zeros.
+    getCallLeadStats(location, from, to).catch((e) => {
+      console.error(`overview/leads: web call leads failed:`, e.message);
+      return null;
+    }),
+    // Partner leads are a separate screen and a separate table; same rule.
     detailed
       ? getPartnerLeads(location, from, to).catch((e) => {
           console.error(`overview/leads: partner leads failed:`, e.message);
@@ -97,35 +123,42 @@ async function gather(location, from, to, detailed) {
       : Promise.resolve(null),
   ]);
 
-  const channels = [];
-  for (const key of ["web", "chatbot", "ivr"]) {
-    const c = stats?.[key];
-    if (!c) continue;
-    channels.push({
+  // All partner sources summed into one Aggregator figure.
+  let aggregator = null;
+  if (partnerRows) {
+    const rows = partnerRows.leads || partnerRows.rows || partnerRows;
+    const tallied = tallyPartner(Array.isArray(rows) ? rows : []);
+    aggregator = { total: 0, appointment: 0, actualVisitCount: 0, ipd: 0 };
+    for (const b of Object.values(tallied)) {
+      aggregator.total += b.total;
+      aggregator.appointment += b.appointment;
+      aggregator.actualVisitCount += b.actualVisitCount;
+      aggregator.ipd += b.ipd;
+    }
+  }
+
+  const source = {
+    ivr:
+      stats?.ivr && ivrCalls != null
+        ? { ...stats.ivr, total: ivrCalls }
+        : stats?.ivr,
+    web: stats?.web,
+    chatbot: stats?.chatbot,
+    webcall: callStats,
+    aggregator,
+  };
+
+  const channels = CHANNELS.map(({ key, label }) => {
+    const c = source[key] || {};
+    return {
       key,
-      label: CHANNEL_LABELS[key],
+      label,
       total: n0(c.total),
       appointment: n0(c.appointment),
       visited: n0(c.actualVisitCount),
       ipd: n0(c.ipd),
-    });
-  }
-
-  if (detailed && partnerRows) {
-    const rows = partnerRows.leads || partnerRows.rows || partnerRows;
-    const tallied = tallyPartner(Array.isArray(rows) ? rows : []);
-    for (const [label, b] of Object.entries(tallied)) {
-      channels.push({
-        // Key stays the raw source, so nothing downstream keyed on it moves.
-        key: label.toLowerCase(),
-        label: PARTNER_LABELS[label] || label,
-        total: b.total,
-        appointment: b.appointment,
-        visited: b.actualVisitCount,
-        ipd: b.ipd,
-      });
-    }
-  }
+    };
+  });
 
   // Totals are summed from the channels actually included, NOT from
   // stats.combined — combined covers only web, chatbot and IVR, so using it
@@ -145,11 +178,64 @@ async function gather(location, from, to, detailed) {
   totals.visitPct =
     totals.total > 0 ? Math.round((totals.visited / totals.total) * 100) : null;
 
+  // Fixed order, zeros kept — see CHANNELS.
+  return { channels, totals };
+}
+
+/**
+ * Home screen's Leads card: source name + lead count only.
+ *
+ *   GET /hms/overview/leadCounts?location&from&to
+ *   → { meta, channels: [{ key, label, total }], total }
+ *
+ * Same five sources, same order and same lead definition (one per phone) as
+ * the Leads section, so the counts agree — but without the visit / IPD
+ * lookups, which the Home card no longer shows.
+ * Each source is fetched independently; one failing shows 0 for that source
+ * rather than failing the card.
+ */
+async function getLeadCounts({ location, from, to }) {
+  if (!location) {
+    const err = new Error("location is required");
+    err.status = 400;
+    throw err;
+  }
+  if (!from || !to) {
+    const err = new Error("from and to are required (YYYY-MM-DD)");
+    err.status = 400;
+    throw err;
+  }
+
+  const safe = (label, p) =>
+    p.catch((e) => {
+      console.error(`overview/leadCounts: ${label} failed:`, e.message);
+      return null;
+    });
+
+  const [main, webcall, aggregator] = await Promise.all([
+    safe("web/chatbot/ivr", getLocationLeadCounts(location, from, to)),
+    safe("web call", getCallLeadCount(location, from, to)),
+    safe("aggregator", getPartnerLeadCount(location, from, to)),
+  ]);
+
+  const counts = {
+    ivr: main?.ivr,
+    web: main?.web,
+    chatbot: main?.chatbot,
+    webcall,
+    aggregator,
+  };
+
+  const channels = CHANNELS.map(({ key, label }) => ({
+    key,
+    label,
+    total: n0(counts[key]),
+  }));
+
   return {
-    channels: channels
-      .filter((c) => c.total > 0)
-      .sort((a, b) => b.total - a.total),
-    totals,
+    meta: { location, from, to, generatedAt: new Date().toISOString() },
+    channels,
+    total: channels.reduce((a, c) => a + c.total, 0),
   };
 }
 
@@ -214,4 +300,4 @@ async function getLeadsSection({ location, from, to, compare, preset }) {
   };
 }
 
-module.exports = { getLeadsSection };
+module.exports = { getLeadsSection, getLeadCounts };

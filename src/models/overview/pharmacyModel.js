@@ -402,25 +402,69 @@ function reduceEvital(rows, wantMedicines) {
   };
 }
 
+/* ── No medicine prescribed ─────────────────────────────────────────────── */
+
+// Patients whose prescription in the range says no medicines were prescribed
+// (prescription.no_medicines_prescribed = 1). Distinct patients, same
+// exclusions as the prescription count in the Daily OPD report (surgery-type
+// rows and deleted rows out). The upper bound is the midnight AFTER `to`, so
+// the last day counts whole whether creation_timestamp is DATE or DATETIME.
+const NO_MEDICINE_SQL = `
+  SELECT COUNT(DISTINCT patient_id) AS n
+    FROM prescription
+   WHERE creation_timestamp >= ? AND creation_timestamp < ?
+     AND prescription_type != 'surgery_type'
+     AND is_deleted != 1
+     AND no_medicines_prescribed = 1
+`;
+
+const nextMidnight = (ymd) => {
+  const [y, m, d] = String(ymd).split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + 1));
+  const p = (x) => String(x).padStart(2, "0");
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(
+    t.getUTCDate(),
+  )} 00:00:00`;
+};
+
+/**
+ * null (card hidden) rather than 0 when the query fails — e.g. a branch DB
+ * where the no_medicines_prescribed column has not been added yet.
+ */
+async function countNoMedicine(run, from, to) {
+  try {
+    const rows = await run(NO_MEDICINE_SQL, [
+      `${from} 00:00:00`,
+      nextMidnight(to),
+    ]);
+    return n0(rows?.[0]?.n);
+  } catch (e) {
+    console.error("overview/pharmacy: no-medicine count failed:", e.message);
+    return null;
+  }
+}
+
 /* ── gather ──────────────────────────────────────────────────────────────── */
 
 async function gather(run, location, from, to, detailed) {
   const fromDt = `${from} 00:00:00`;
   const toDt = `${to} 23:59:59`;
 
-  const [hmsRows, evitalRows, prescriptions] = await Promise.all([
-    run(hmsSqlFor(location), [fromDt, toDt]).catch((e) => {
-      console.error(`overview/pharmacy: HMS query failed:`, e.message);
-      return null;
-    }),
-    run(EVITAL_SQL, [fromDt, toDt]).catch((e) => {
-      console.error(`overview/pharmacy: eVital query failed:`, e.message);
-      return [];
-    }),
-    // Current window only — nothing shows a prescription delta, and parsing
-    // every prescription twice would double the heaviest work in this model.
-    detailed ? gatherPrescriptions(run, fromDt, toDt) : Promise.resolve(null),
-  ]);
+  const [hmsRows, evitalRows, prescriptions, noMedicinePatients] =
+    await Promise.all([
+      run(hmsSqlFor(location), [fromDt, toDt]).catch((e) => {
+        console.error(`overview/pharmacy: HMS query failed:`, e.message);
+        return null;
+      }),
+      run(EVITAL_SQL, [fromDt, toDt]).catch((e) => {
+        console.error(`overview/pharmacy: eVital query failed:`, e.message);
+        return [];
+      }),
+      // Current window only — nothing shows a prescription delta, and parsing
+      // every prescription twice would double the heaviest work in this model.
+      detailed ? gatherPrescriptions(run, fromDt, toDt) : Promise.resolve(null),
+      detailed ? countNoMedicine(run, from, to) : Promise.resolve(null),
+    ]);
 
   const hms = hmsRows?.[0] || {};
   const hmsCash = Math.round(n0(hms.cash));
@@ -443,6 +487,7 @@ async function gather(run, location, from, to, detailed) {
     // honest denominator for avgBill, and the export may want it.
     avgBill: bills > 0 ? Math.round(revenue / bills) : null,
     patients: ev.patients, // eVital only — pharmacybill exposes no patient link
+    noMedicinePatients,
     otherAmount: ev.modes.Other,
     modes: {
       Cash: hmsCash + ev.modes.Cash,
@@ -521,6 +566,8 @@ async function getPharmacySection({ location, from, to, compare, preset }) {
     bills: current.bills,
     avgBill: current.avgBill,
     patients: current.patients,
+    // Patients whose prescription recorded no medicines — see NO_MEDICINE_SQL.
+    noMedicinePatients: current.noMedicinePatients,
     otherAmount: current.otherAmount,
     modes: current.modes,
     sources: current.sources,

@@ -1,5 +1,13 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 const { adviceBucket } = require("./adviceUtils");
+const { countedSql } = require("./utils/interbranch");
+
+// Interbranch rule (utils/interbranch.js): an operating-branch copy of an
+// interbranch invoice belongs to the SOURCE branch, so it does not count as a
+// surgery / conversion here. Tables are unaliased in these subqueries, so the
+// rule is qualified with the table name.
+const COUNTED_INV = countedSql("invoice");
+
 // Parse the provisionalDiagnosis TEXT column into an object, safely. It stores
 // JSON like {"piles":["Grade 2"],"fistula":["Fistula in Ano"]} — keys are
 // specialities, values are sub-type arrays. Handles null / '' / '{}' / malformed.
@@ -177,7 +185,8 @@ async function getConvincingScore(req) {
 
     const invoiceQuery = `SELECT patient_id
                           FROM invoice
-                          WHERE creation_date >= ?`;
+                          WHERE creation_date >= ?
+                            AND ${COUNTED_INV}`;
 
     const queries = [
       executeQuery(mainDoctorPerformanceQuery, [req.query.from, req.query.to]),
@@ -452,7 +461,7 @@ WHERE d.patient_id IN (
     FROM invoice
     WHERE creation_date >= ? 
       AND creation_date <= ? 
-      AND is_deleted != 1
+      AND is_deleted != 1 AND ${COUNTED_INV}
 )
 GROUP BY d.patient_id;
 `;
@@ -471,7 +480,7 @@ WHERE d.patient_id IN (
     FROM invoice
     WHERE creation_date >= ? 
       AND creation_date <= ? 
-      AND is_deleted != 1
+      AND is_deleted != 1 AND ${COUNTED_INV}
 )
 AND d.date_diagnosis >= ? 
 AND d.date_diagnosis <= ?
@@ -630,7 +639,7 @@ WHERE d.patient_id IN (
     FROM invoice
     WHERE creation_date >= ? 
       AND creation_date <= ? 
-      AND is_deleted != 1
+      AND is_deleted != 1 AND ${COUNTED_INV}
 )
 GROUP BY d.patient_id;
 `;
@@ -649,7 +658,7 @@ WHERE d.patient_id IN (
     FROM invoice
     WHERE creation_date >= ? 
       AND creation_date <= ? 
-      AND is_deleted != 1
+      AND is_deleted != 1 AND ${COUNTED_INV}
 )
 AND d.date_diagnosis >= ? 
 AND d.date_diagnosis <= ?
@@ -804,14 +813,14 @@ WHERE d.patient_id IN (
     FROM invoice
     WHERE creation_date >= ? 
       AND creation_date <= ? 
-      AND is_deleted != 1
+      AND is_deleted != 1 AND ${COUNTED_INV}
 )
 GROUP BY d.patient_id;
 `;
 
     const procedureCountQuery = `SELECT patient_id, COUNT(*) AS procedureCount
                                  FROM invoice
-                                 WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1
+                                 WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1 AND ${COUNTED_INV}
                                  GROUP BY patient_id`;
 
     const sameMonthInvoiceQuery = `SELECT 
@@ -828,20 +837,31 @@ WHERE d.patient_id IN (
     FROM invoice
     WHERE creation_date >= ? 
       AND creation_date <= ? 
-      AND is_deleted != 1
+      AND is_deleted != 1 AND ${COUNTED_INV}
 )
 AND d.date_diagnosis >= ? 
 AND d.date_diagnosis <= ?
 GROUP BY d.patient_id;
 `;
 
-    // Run both queries in parallel
+    // Interbranch invoices operated here for another branch — excluded from
+    // every surgery / conversion figure above (they count at the source
+    // branch). Returned so the screen can say how many were left out.
+    const interbranchQuery = `SELECT COUNT(*) AS invoices,
+                                     COUNT(DISTINCT patient_id) AS patients
+                                FROM invoice
+                               WHERE creation_date >= ? AND creation_date <= ?
+                                 AND is_deleted != 1
+                                 AND NOT (${COUNTED_INV})`;
+
+    // Run the queries in parallel
     const [
       mainDoctorRows,
       assistantDoctorRows,
       invoiceQueryRows,
       sameMonthInvoiceRows,
       procedureCountRows,
+      interbranchRows,
     ] = await Promise.all([
       executeQuery(distinctDiagnosisQuery, [newPatientIds]),
       executeQuery(countsQuery, [newPatientIds]),
@@ -853,6 +873,12 @@ GROUP BY d.patient_id;
         req.query.to,
       ]),
       executeQuery(procedureCountQuery, [req.query.from, req.query.to]),
+      executeQuery(interbranchQuery, [req.query.from, req.query.to]).catch(
+        (e) => {
+          console.error("ConvincingScore/v3 interbranch failed:", e.message);
+          return [];
+        },
+      ),
     ]);
 
     const { consultantDoctors, assistantDoctors, totalCounts } =
@@ -882,6 +908,11 @@ GROUP BY d.patient_id;
         totalSurgery: totalCounts.Surgery,
         totalOther: totalCounts.Other,
         totalSurgeriesPerformed: totalSurgeriesPerformed,
+        // Not in totalSurgeriesPerformed — counted at the source branch.
+        interbranchExcluded: {
+          invoices: Number(interbranchRows?.[0]?.invoices) || 0,
+          patients: Number(interbranchRows?.[0]?.patients) || 0,
+        },
       },
     };
   } catch (error) {

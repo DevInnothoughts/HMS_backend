@@ -5,7 +5,6 @@
 //     app.use("/hms/overview", overviewController);
 //
 //   GET /hms/overview/collection?location&from&to
-//   GET /hms/overview/leadCounts?location&from&to   (Home's Leads card)
 //   GET /hms/overview/section/:id?location&from&to&compare=prev
 //
 // Sections are registered one at a time in SECTION_MODELS. An id with no model
@@ -23,10 +22,7 @@ const { getIpdFeedback } = require("../models/overview/ipdFeedbackModel");
 const { getIpdSection } = require("../models/overview/ipdModel");
 const { getLabSection } = require("../models/overview/labModel");
 const { getPharmacySection } = require("../models/overview/pharmacyModel");
-const {
-  getLeadsSection,
-  getLeadCounts,
-} = require("../models/overview/leadsModel");
+const { getLeadsSection } = require("../models/overview/leadsModel");
 const { getReportsSection } = require("../models/overview/reportsModel");
 const {
   getBranchSummary,
@@ -59,16 +55,6 @@ function send(res, next, work) {
 router.get("/collection", (req, res, next) =>
   send(res, next, () =>
     getCollection(req.query.location, req.query.from, req.query.to),
-  ),
-);
-
-router.get("/leadCounts", (req, res, next) =>
-  send(res, next, () =>
-    getLeadCounts({
-      location: req.query.location,
-      from: req.query.from,
-      to: req.query.to,
-    }),
   ),
 );
 
@@ -107,20 +93,8 @@ router.get("/branchSummary", (req, res, next) => {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  // Logged on arrival and on completion: this call is slow (every branch in
-  // turn), so the log is how you tell "never arrived" from "still working".
-  const started = Date.now();
-  console.log(
-    `branchSummary: request ${req.query.from}..${req.query.to}, ` +
-      `${locations.length} branch(es)`,
-  );
   getBranchSummary({ from: req.query.from, to: req.query.to, locations })
-    .then((d) => {
-      console.log(
-        `branchSummary: done in ${((Date.now() - started) / 1000).toFixed(1)}s`,
-      );
-      res.json(d);
-    })
+    .then((d) => res.json(d))
     .catch((err) =>
       err?.status
         ? res.status(err.status).json({ error: err.message })
@@ -129,51 +103,23 @@ router.get("/branchSummary", (req, res, next) => {
 });
 
 // GET /hms/overview/branchSummaryV2?from&to&locations=a,b,c
-// New patients and revenue per new patient per branch — BranchSummaryScreen.
+// New patients + revenue per new patient. V1 above stays for older app builds.
 router.get("/branchSummaryV2", (req, res, next) => {
   const locations = String(req.query.locations || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const started = Date.now();
-  console.log(
-    `branchSummaryV2: request ${req.query.from}..${req.query.to}, ` +
-      `${locations.length} branch(es)`,
+  send(res, next, () =>
+    getBranchSummaryV2({ from: req.query.from, to: req.query.to, locations }),
   );
-  getBranchSummaryV2({ from: req.query.from, to: req.query.to, locations })
-    .then((d) => {
-      console.log(
-        `branchSummaryV2: done in ${((Date.now() - started) / 1000).toFixed(1)}s`,
-      );
-      res.json(d);
-    })
-    .catch((err) =>
-      err?.status
-        ? res.status(err.status).json({ error: err.message })
-        : next(err),
-    );
 });
 
 // GET /hms/overview/branchTrend?location=Baner
-// One branch's monthly / quarterly / yearly new patients and revenue per new
-// patient — BranchTrendScreen. Without this route the screen falls back to one
-// /branchSummary call per period, which is far slower.
-router.get("/branchTrend", (req, res, next) => {
-  const started = Date.now();
-  console.log(`branchTrend: request ${req.query.location}`);
-  getBranchTrend({ location: req.query.location })
-    .then((d) => {
-      console.log(
-        `branchTrend: ${req.query.location} done in ` +
-          `${((Date.now() - started) / 1000).toFixed(1)}s`,
-      );
-      res.json(d);
-    })
-    .catch((err) =>
-      err?.status
-        ? res.status(err.status).json({ error: err.message })
-        : next(err),
-    );
-});
+// Monthly (12), quarterly (8) and FY (5) buckets for one branch, in one call.
+router.get("/branchTrend", (req, res, next) =>
+  send(res, next, () =>
+    getBranchTrend({ location: String(req.query.location || "").trim() }),
+  ),
+);
 
 module.exports = router;

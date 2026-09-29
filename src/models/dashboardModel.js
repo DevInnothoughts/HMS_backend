@@ -1,5 +1,7 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 const { getApprovalDetails } = require("./approvalModel");
+const { countedSql } = require("./utils/interbranch");
+const { getIpdNpsSummary } = require("./overview/ipdFeedbackModel");
 
 const excludedNumbers = [
   "+917411951943",
@@ -137,6 +139,8 @@ AND p.is_deleted != 1;
   AND ap.appointment_timestamp <= ?
   AND ap.is_deleted != 1
 `;
+      // Interbranch rule (utils/interbranch.js): an operating-branch copy of an
+      // interbranch invoice belongs to the source branch and is not counted.
       const ipdCountQuery = `
   SELECT 
     COUNT(*) AS ipd_count
@@ -144,6 +148,19 @@ AND p.is_deleted != 1;
   WHERE i.creation_date >= ?  
   AND i.creation_date <= ?
   AND i.is_deleted != 1
+  AND ${countedSql("i")}
+`;
+      // What the rule above left out — operated here for another branch — so
+      // the Home screen can say so beside the count instead of it just dropping.
+      const ipdInterbranchQuery = `
+  SELECT 
+    COUNT(*) AS cnt,
+    COALESCE(SUM(i.totalamt), 0) AS amount
+  FROM invoice i
+  WHERE i.creation_date >= ?  
+  AND i.creation_date <= ?
+  AND i.is_deleted != 1
+  AND NOT (${countedSql("i")})
 `;
 
       const dischargeCardCountQuery = `
@@ -252,6 +269,7 @@ AND p.is_deleted != 1;
         helpline_outgoing_count,
         totalPatientCount,
         npsAverageCount,
+        ipdInterbranch,
       ] = await Promise.all([
         executeQuery(newPatientCountQuery, [req.query.from, req.query.to]),
         executeQuery(followPatientCountQuery, [req.query.from, req.query.to]),
@@ -290,9 +308,22 @@ AND p.is_deleted != 1;
         ]),
         executeQuery(totalPatientCountQuery),
         executeQuery(npsAverageQuery),
+        executeQuery(ipdInterbranchQuery, [req.query.from, req.query.to]),
       ]);
 
       const approvalStatus = await getApprovalDetails(req.query.location);
+
+      // Real Net Promoter Score for the SELECTED range — the Patient Feedback
+      // screen's calculation (ipdFeedbackModel), not the star-rating average
+      // below. A failure here must not take down the rest of the dashboard.
+      const npsSummary = await getIpdNpsSummary({
+        location: req.query.location,
+        from: String(req.query.from || "").slice(0, 10),
+        to: String(req.query.to || "").slice(0, 10),
+      }).catch((e) => {
+        console.error("Dashboard NPS failed:", e.message);
+        return { nps: null, responses: null, operated: null };
+      });
       console.log("NPS Average:", npsAverageCount[0].branch_average_rating);
 
       return {
@@ -305,6 +336,10 @@ AND p.is_deleted != 1;
         totalPatients: totalPatientCount[0].totalPatients,
         appointment_count: appointment_count[0].appointment_count,
         ipd_count: ipd_count[0].ipd_count,
+        // Interbranch invoices operated here for another branch — NOT in
+        // ipd_count (they count at the source branch). For display only.
+        ipd_interbranch_count: Number(ipdInterbranch[0]?.cnt) || 0,
+        ipd_interbranch_amount: Number(ipdInterbranch[0]?.amount) || 0,
         dc_count: dc_count[0].dc_count,
         missed_count: missed_count[0].missed_count,
         attended_missed_count: attended_missed_count[0].attended_missed_count,
@@ -317,7 +352,14 @@ AND p.is_deleted != 1;
         helpline_outgoing_count:
           helpline_outgoing_count[0].helpline_outgoing_count,
         approvalStatus,
+        // ⚠️ nps_avg is an average STAR RATING (1–5) over the financial year,
+        // not an NPS. Kept for AdminHome's star display only.
         nps_avg: npsAverageCount[0].branch_average_rating || 0,
+        // Net Promoter Score (−100…+100) for the selected range, identical to
+        // the Patient Feedback screen. null when nobody has responded.
+        nps: npsSummary.nps,
+        nps_responses: npsSummary.responses,
+        nps_operated: npsSummary.operated,
       };
     } catch (error) {
       console.error("Error executing queries:", error);

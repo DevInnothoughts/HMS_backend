@@ -81,14 +81,18 @@ router.get("/partnerLeads", async (req, res, next) => {
  * an empty screen rather than an obvious error.
  * ─────────────────────────────────────────────────────────────────────────── */
 
-// GET /hms/leadManagement/call?location=Thane
+// GET /hms/leadManagement/call?location=Thane&from=2026-09-01&to=2026-09-26
+// from/to optional — without them, the 100 most recent leads.
 router.get("/call", async (req, res, next) => {
   try {
-    const { location } = req.query;
+    const { location, from, to } = req.query;
     if (!location) {
       return res.status(400).send({ error: "location is required" });
     }
-    res.status(200).send(await getCallLeads(location));
+    // Guard against the literal string "undefined" from a missing client param.
+    const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
+    const range = isDate(from) && isDate(to) ? { from, to } : {};
+    res.status(200).send(await getCallLeads(location, range));
   } catch (err) {
     // Logged by name so a missing column or table is identifiable in the log
     // rather than surfacing only as an empty list on the device.

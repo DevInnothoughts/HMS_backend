@@ -3,6 +3,7 @@ const xlsx = require("xlsx");
 const path = require("path");
 const nodemailer = require("nodemailer");
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { countedSql } = require("./utils/interbranch");
 
 // Create "report" folder in project root if it doesn't exist
 const reportsDir = path.join(__dirname, "..", "report"); // ".." goes to project root
@@ -1238,6 +1239,86 @@ const countsFor = (location, from, to) =>
     );
   });
 
+// ── Interbranch (V2 only) ──────────────────────────────────────────────────
+// An interbranch surgery has the same invoice in two branch DBs; it belongs to
+// the SOURCE branch. The operating branch's copy is excluded — the rule in
+// utils/interbranch.js, same as every other screen. Same bounds and
+// is_deleted filter as getLocationSummary's IPD invoice query, so
+// net = gross − excluded exactly. Grouped by status so the per-type split can
+// be corrected too.
+const INTERBRANCH_SQL = `
+  SELECT i.status,
+         COUNT(*)                        AS cnt,
+         COALESCE(SUM(i.totalamt), 0)    AS amount,
+         COALESCE(SUM(i.discount), 0)    AS discount
+    FROM invoice i
+   WHERE i.creation_date >= ? AND i.creation_date <= ?
+     AND i.is_deleted != 1
+     AND NOT (${countedSql("i")})
+   GROUP BY i.status
+`;
+
+const interbranchFor = (location, from, to) =>
+  new Promise((resolve) => {
+    const { connection } = getConnectionByLocation(location);
+    if (!connection) return resolve(null);
+    connection.query(
+      INTERBRANCH_SQL,
+      [`${from} 00:00:00`, `${to} 23:59:59`],
+      (err, rows) => {
+        if (err) {
+          // Leave that branch GROSS and say so, rather than fail the report.
+          console.error(
+            `summaryReport interbranch failed for ${location}:`,
+            err.message,
+          );
+          return resolve(null);
+        }
+        const out = { invoices: 0, amount: 0, discount: 0, byStatus: {} };
+        for (const r of rows || []) {
+          const amt = Number(r.amount) || 0;
+          out.invoices += Number(r.cnt) || 0;
+          out.amount += amt;
+          out.discount += Number(r.discount) || 0;
+          out.byStatus[r.status] = (out.byStatus[r.status] || 0) + amt;
+        }
+        resolve(out);
+      },
+    );
+  });
+
+// Net one branch's IPD invoice figures in place; returns what was excluded.
+function applyInterbranchToBranch(b, ib) {
+  const inv =
+    b.ipdInvoice ||
+    (b.ipdInvoice = { byStatus: {}, total: 0, totalDiscount: 0 });
+  inv.grossTotal = Number(inv.total) || 0;
+  if (!ib) {
+    inv.interbranch = {
+      invoices: 0,
+      amount: 0,
+      discount: 0,
+      byStatus: {},
+      failed: true,
+    };
+    return null;
+  }
+  inv.interbranch = ib;
+  if (!ib.invoices) return ib;
+  for (const [st, amt] of Object.entries(ib.byStatus)) {
+    const left = (Number(inv.byStatus?.[st]) || 0) - amt;
+    if (!inv.byStatus) inv.byStatus = {};
+    // Drop a status whose whole amount was interbranch, rather than show ₹0.
+    if (Math.abs(left) < 0.005) delete inv.byStatus[st];
+    else inv.byStatus[st] = left;
+  }
+  inv.total = inv.grossTotal - ib.amount;
+  inv.totalDiscount = (Number(inv.totalDiscount) || 0) - ib.discount;
+  b.grandTotalGross = Number(b.grandTotal) || 0;
+  b.grandTotal = b.grandTotalGross - ib.amount;
+  return ib;
+}
+
 /**
  * generateSummaryReportV2 — V1 plus patient counts and per-patient averages.
  *
@@ -1248,6 +1329,13 @@ const countsFor = (location, from, to) =>
  * ⚠️ Same signature as V1 — plain dates, NOT a request object. V1 already
  * walks every branch serially; this adds one more query per branch on top, so
  * it is the slowest call in the app by some margin.
+ *
+ * INTERBRANCH: V2 also nets each branch's IPD billed figures of interbranch
+ * copies (see INTERBRANCH_SQL above) — ipdInvoice.total, byStatus,
+ * totalDiscount and grandTotal — and reports what was excluded as
+ * ipdInvoice.interbranch { invoices, amount, discount, byStatus } plus
+ * ipdInvoice.grossTotal / grandTotalGross, per branch and in summary. V1 (and
+ * the report mail built on it) is unchanged.
  */
 async function generateSummaryReportV2(fromDate, toDate) {
   const base = await generateSummaryReport(fromDate, toDate);
@@ -1260,7 +1348,12 @@ async function generateSummaryReportV2(fromDate, toDate) {
     await Promise.all(
       slice.map(async (b) => {
         if (b.error) return; // unreachable branch — leave it alone
-        const c = await countsFor(b.location, fromDate, toDate);
+        // Interbranch first, so the averages below are on NET revenue.
+        const [c, ib] = await Promise.all([
+          countsFor(b.location, fromDate, toDate),
+          interbranchFor(b.location, fromDate, toDate),
+        ]);
+        applyInterbranchToBranch(b, ib);
         b.visits = c.visits;
         b.newVisits = c.newVisits;
         const total = Number(b.grandTotal) || 0;
@@ -1273,6 +1366,43 @@ async function generateSummaryReportV2(fromDate, toDate) {
 
   // Group figures are summed from the branches that reported, NOT recomputed
   // from a separate query — so the cards and the rows always agree.
+  // Net the group IPD figures by what each reporting branch excluded.
+  const sIB = {
+    invoices: 0,
+    amount: 0,
+    discount: 0,
+    byStatus: {},
+    failedBranches: [],
+  };
+  for (const b of branches) {
+    if (b.error) continue;
+    const ib = b.ipdInvoice?.interbranch;
+    if (!ib) continue;
+    if (ib.failed) {
+      sIB.failedBranches.push(b.location);
+      continue;
+    }
+    sIB.invoices += ib.invoices;
+    sIB.amount += ib.amount;
+    sIB.discount += ib.discount;
+    for (const [st, amt] of Object.entries(ib.byStatus))
+      sIB.byStatus[st] = (sIB.byStatus[st] || 0) + amt;
+  }
+  if (base?.summary) {
+    const inv = base.summary.ipdInvoice;
+    inv.grossTotal = Number(inv.total) || 0;
+    for (const [st, amt] of Object.entries(sIB.byStatus)) {
+      const left = (Number(inv.byStatus?.[st]) || 0) - amt;
+      if (Math.abs(left) < 0.005) delete inv.byStatus[st];
+      else inv.byStatus[st] = left;
+    }
+    inv.total = inv.grossTotal - sIB.amount;
+    inv.totalDiscount = (Number(inv.totalDiscount) || 0) - sIB.discount;
+    inv.interbranch = sIB;
+    base.summary.grandTotalGross = Number(base.summary.grandTotal) || 0;
+    base.summary.grandTotal = base.summary.grandTotalGross - sIB.amount;
+  }
+
   const ok = branches.filter((b) => !b.error && b.visits != null);
   const visits = ok.reduce((a, b) => a + b.visits, 0);
   const newVisits = ok.reduce((a, b) => a + b.newVisits, 0);

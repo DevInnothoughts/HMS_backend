@@ -92,6 +92,37 @@ const rating = (v) => {
   return Math.min(5, Math.max(0, n));
 };
 
+// recommendScore first, then the two aliases — same number in the sample, but
+// if they ever diverge the explicitly-named field is the honest one.
+const recommendScoreOf = (fb) =>
+  fb
+    ? (numOrNull(fb.recommendScore) ??
+      numOrNull(fb.netPromoterScore) ??
+      numOrNull(fb.nps))
+    : null;
+
+/**
+ * NPS from a list of 0–10 recommend scores (nulls ignored).
+ * NPS = %Promoters − %Detractors, rounded once at the end. Rounding the two
+ * percentages first can shift the result by a point.
+ * Shared by getIpdFeedback and getIpdNpsSummary so the feedback screen and the
+ * Home screen can never disagree.
+ */
+function computeNps(scores) {
+  const valid = scores.filter((v) => v != null);
+  const counts = { promoter: 0, passive: 0, detractor: 0 };
+  for (const v of valid) counts[band(v)]++;
+  const n = valid.length;
+  const pct = (c) => (n > 0 ? (c / n) * 100 : 0);
+  return {
+    n,
+    counts,
+    pct,
+    nps:
+      n > 0 ? Math.round(pct(counts.promoter) - pct(counts.detractor)) : null,
+  };
+}
+
 const band = (score) => {
   if (score == null) return null;
   if (score >= 9) return "promoter";
@@ -181,13 +212,7 @@ async function getIpdFeedback({ location, from, to }) {
   const patients = rows.map((r) => {
     const fb = parseFeedback(r.ipdFeedback);
 
-    // recommendScore first, then the two aliases — same number in the sample,
-    // but if they ever diverge the explicitly-named field is the honest one.
-    const recommendScore = fb
-      ? (numOrNull(fb.recommendScore) ??
-        numOrNull(fb.netPromoterScore) ??
-        numOrNull(fb.nps))
-      : null;
+    const recommendScore = recommendScoreOf(fb);
 
     const achieved = fb ? numOrNull(fb.totalScoreAchieved) : null;
     const max = fb ? numOrNull(fb.maxPossibleScore) : null;
@@ -236,16 +261,9 @@ async function getIpdFeedback({ location, from, to }) {
   const responded = patients.filter(
     (p) => p.responded && p.recommendScore != null,
   );
-  const counts = { promoter: 0, passive: 0, detractor: 0 };
-  for (const p of responded) if (p.band) counts[p.band]++;
-
-  const n = responded.length;
-  const pct = (c) => (n > 0 ? (c / n) * 100 : 0);
-
-  // NPS = %Promoters − %Detractors, rounded once at the end. Rounding the two
-  // percentages first can shift the result by a point.
-  const nps =
-    n > 0 ? Math.round(pct(counts.promoter) - pct(counts.detractor)) : null;
+  const { n, counts, pct, nps } = computeNps(
+    responded.map((p) => p.recommendScore),
+  );
 
   const psiValues = patients
     .filter((p) => p.psiPct != null)
@@ -284,4 +302,31 @@ async function getIpdFeedback({ location, from, to }) {
   };
 }
 
-module.exports = { getIpdFeedback, SECTIONS };
+// Light version of LIST_SQL — only the feedback column is needed for NPS.
+const NPS_SQL = `
+  SELECT ipdFeedback
+  FROM ipdpatients
+  WHERE LEFT(surgery_date, 10) BETWEEN ? AND ?
+    AND is_deleted != 1
+`;
+
+/**
+ * getIpdNpsSummary({ location, from, to }) → { nps, responses, operated }
+ *
+ * The same cohort, same recommend score and same maths as getIpdFeedback's
+ * summary.nps — without building per-patient rows. Used by the Home screen's
+ * Performance card (dashboardModel), so its NPS matches the Patient Feedback
+ * screen for the same date range.
+ */
+async function getIpdNpsSummary({ location, from, to }) {
+  const { connection } = getConnectionByLocation(location);
+  if (!connection) throw new Error(`Invalid location: ${location}`);
+  const rows = await makeRunner(connection)(NPS_SQL, [from, to]);
+  const scores = rows.map((r) =>
+    recommendScoreOf(parseFeedback(r.ipdFeedback)),
+  );
+  const { n, nps } = computeNps(scores);
+  return { nps, responses: n, operated: rows.length };
+}
+
+module.exports = { getIpdFeedback, getIpdNpsSummary, SECTIONS };

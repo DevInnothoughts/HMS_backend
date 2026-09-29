@@ -41,6 +41,8 @@ const {
   syncAppointments,
   syncBotAppointments,
 } = require("./src/models/leadManagementModel");
+
+const { syncCallAppointments } = require("./src/models/callLeadsModel");
 const {
   getTomorrowsAppointment,
   sendScheduledWhatsAppMsg,
@@ -154,6 +156,7 @@ app.use((err, req, res, next) => {
 //     //console.log(`🔁 Running sync for location: ${location}`);
 //     // syncAppointments(location);
 //     // syncBotAppointments(location);
+//  //syncCallAppointments(location);
 //   });
 // });
 
@@ -203,13 +206,13 @@ cron.schedule(
 //       //   "2026-06-30",
 //       //   ["Andheri", "Thane", "Navi Mumbai", "Vashi"],
 //       // );
-//       // generateAllBranchFeedbackExcel({
-//       //   from: "2026-08-20",
-//       //   to: "2026-09-11",
-//       //   locations,
-//       // })
-//       //   .then((r) => console.log("Feedback workbook:", r.filePath))
-//       //   .catch((e) => console.error("Feedback workbook failed:", e.message));
+//       generateAllBranchFeedbackExcel({
+//         from: "2026-08-15",
+//         to: "2026-09-28",
+//         locations,
+//       })
+//         .then((r) => console.log("Feedback workbook:", r.filePath))
+//         .catch((e) => console.error("Feedback workbook failed:", e.message));
 //       //console.log("Report generated successfully:", history);
 //       // generateSurgeryPendingExcel({
 //       //   from: "2026-06-01",

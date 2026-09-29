@@ -5,30 +5,38 @@
  *
  *      Jan–Jul 2026   vs   Jan–Jul 2025
  *
- * Same workbook layout as Monthwise_Surgeries_2026_vs_2025_01-06.xlsx — this
- * only changes the window (endMonth 6 → 7). No model code is touched:
- * getMonthwiseSurgeryReport already takes { year, previousYear, startMonth,
- * endMonth }, and every sheet builder reads period.monthList, so the extra
- * month flows through the Monthly Totals, By Surgery Type, Location Summary
- * and all four Location × Month / Location × Type matrices automatically.
+ * Same workbook layout as Monthwise_Surgeries_2026_vs_2025_01-06.xlsx, now with
+ * the INTERBRANCH rule applied (options.interbranch = true):
  *
- * ── Place this file at the PROJECT ROOT ──────────────────────────────────────
- * (next to app.js / databaseUtils.js / dbconfig.js), because it requires
- * ./src/models/surgeryRevenueReportModel, which in turn resolves
- * ../../databaseUtils from src/models.
+ *   An interbranch surgery has the same invoice in two branch DBs; it belongs
+ *   to the SOURCE branch. The operating branch's copy is excluded — the same
+ *   rule the app uses (src/models/utils/interbranch.js; DP Road always
+ *   counted). Every surgery count and revenue figure is therefore NET, and an
+ *   interbranch surgery is counted once across the group instead of twice.
+ *
+ * Where the difference is shown:
+ *   Monthly Totals / Location Summary   + IB excl. surgeries & revenue, both years
+ *   Interbranch <year> (×2, new)        location × month: excluded # and ₹
+ *   By Surgery Type / Loc-Type sheets   net only (excluded cases carry no type)
+ *   Gross = net + excluded, exactly, for surgeries and revenue.
+ *
+ * ── Place this file in temp/ ─────────────────────────────────────────────────
+ * It requires ../src/models/surgeryRevenueReportModel (and, through it,
+ * src/models/utils/interbranch.js and databaseUtils).
  *
  * ── Run ─────────────────────────────────────────────────────────────────────
- *   node tmp_generateSurgeryReport_Jan_Jul.js
+ *   node temp/tmp_generateSurgeryReport_Jan_Jul.js
  *
  *   # override branches (comma-separated, must match getConnectionByLocation keys)
- *   node tmp_generateSurgeryReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi"
+ *   node temp/tmp_generateSurgeryReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi"
  *
  *   # override the window too:  <locations> <year> <startMonth> <endMonth>
- *   node tmp_generateSurgeryReport_Jan_Jul.js "Andheri,Thane" 2026 1 7
+ *   node temp/tmp_generateSurgeryReport_Jan_Jul.js "Andheri,Thane" 2026 1 7
  *
  * ── Output ──────────────────────────────────────────────────────────────────
- *   src/report/Monthwise_Surgeries_2026_vs_2025_01-07.xlsx
- *   (filename is derived by the model from year / previousYear / start / end)
+ *   src/report/Monthwise_Surgeries_2026_vs_2025_01-07_IPDnet.xlsx
+ *   (_IPDnet marks the interbranch-adjusted file, so it never overwrites the
+ *   earlier gross workbook)
  *
  * DELETE THIS FILE once the workbook has been generated.
  * ---------------------------------------------------------------------------
@@ -66,6 +74,7 @@ const OPTIONS = {
   previousYear: Number(process.argv[3]) ? Number(process.argv[3]) - 1 : 2025,
   startMonth: Number(process.argv[4]) || 1,
   endMonth: Number(process.argv[5]) || 7, // ← July (was 6)
+  interbranch: true, // exclude operating-branch copies; report them apart
 };
 
 /* ── Run ─────────────────────────────────────────────────────────────────── */
@@ -74,7 +83,9 @@ const OPTIONS = {
   const t0 = Date.now();
 
   console.log("──────────────────────────────────────────────────────────");
-  console.log("Month-wise Surgery Report (temporary runner)");
+  console.log(
+    "Month-wise Surgery Report — net of interbranch (temporary runner)",
+  );
   console.log(
     `Window   : ${OPTIONS.startMonth}–${OPTIONS.endMonth} | ` +
       `${OPTIONS.year} vs ${OPTIONS.previousYear}`,
@@ -88,27 +99,41 @@ const OPTIONS = {
     const { current, previous } = report.totals;
 
     console.log(`\n✅ Workbook written: ${result.filePath}`);
-    console.log(`   Sheets follow the same layout as the Jan–Jun file.`);
+    console.log(
+      `   Same layout as the Jan–Jun file, net of interbranch, plus ` +
+        `IB columns and 'Interbranch ${report.period.year}/${report.period.previousYear}' sheets.`,
+    );
 
     // Quick sanity print so you can eyeball the numbers before mailing it out.
     console.log(
       `\nTotals (${report.period.months}) ` +
         `— ${report.period.year} vs ${report.period.previousYear}:`,
     );
+    const inr = (n) => Math.round(Number(n) || 0).toLocaleString("en-IN");
+    const ci = current.interbranch || { surgeries: 0, revenue: 0 };
+    const pi = previous.interbranch || { surgeries: 0, revenue: 0 };
     console.log(
-      `   Surgeries : ${current.surgeries}  vs  ${previous.surgeries}` +
+      `   Surgeries (net) : ${current.surgeries}  vs  ${previous.surgeries}` +
         `   (Δ ${current.surgeries - previous.surgeries})`,
     );
     console.log(
-      `   Revenue ₹ : ${current.revenue.toLocaleString("en-IN")}  vs  ` +
-        `${previous.revenue.toLocaleString("en-IN")}`,
+      `   Revenue ₹ (net) : ${inr(current.revenue)}  vs  ${inr(previous.revenue)}`,
+    );
+    console.log(
+      `   Interbranch excl: ${ci.surgeries} SX · ₹ ${inr(ci.revenue)}` +
+        `  vs  ${pi.surgeries} SX · ₹ ${inr(pi.revenue)}`,
+    );
+    console.log(
+      `   [gross would be ${current.surgeries + ci.surgeries} SX · ₹ ${inr(current.revenue + ci.revenue)}` +
+        `  vs  ${previous.surgeries + pi.surgeries} SX · ₹ ${inr(previous.revenue + pi.revenue)}]`,
     );
 
-    console.log("\nMonth-wise surgeries:");
+    console.log("\nMonth-wise surgeries (net)   [interbranch excluded]:");
     report.months.forEach((m) => {
       console.log(
         `   ${m.monthName.padEnd(10)} ${String(m.current.surgeries).padStart(5)}` +
-          `  vs ${String(m.previous.surgeries).padStart(5)}`,
+          `  vs ${String(m.previous.surgeries).padStart(5)}` +
+          `   [${m.current.interbranch?.surgeries || 0} vs ${m.previous.interbranch?.surgeries || 0}]`,
       );
     });
 

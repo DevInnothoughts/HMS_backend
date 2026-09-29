@@ -33,14 +33,20 @@
 // and the screen shows the difference rather than letting two screens disagree
 // with no explanation.
 //
-// Revenue is SUM(invoice.totalamt), the same figure getLocationSummary's
-// ipdInvoice total produces, so it equals the IPD slice of the home screen's
-// collection bar.
+// Revenue is SUM(invoice.totalamt) with the interbranch rule applied — the
+// same figure overview/collectionModel's IPD slice produces, so it equals the
+// IPD slice of the home screen's billing bar.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../../databaseUtils");
 const { tallySex } = require("../utils/sex");
 const { previousPeriod } = require("./opdModel");
+const { countedSql } = require("../utils/interbranch");
+
+// Interbranch rule (utils/interbranch.js) — operating-branch copies of an
+// interbranch invoice belong to the source branch and are excluded throughout,
+// so this screen keeps matching the Home IPD tile and billing slice.
+const COUNTED = countedSql("i");
 
 const makeRunner =
   (connection) =>
@@ -87,6 +93,7 @@ const BY_STATUS_SQL = `
   FROM invoice i
   WHERE i.creation_date >= ? AND i.creation_date <= ?
     AND i.is_deleted != 1
+    AND ${COUNTED}
   GROUP BY COALESCE(NULLIF(TRIM(i.status), ''), 'Unspecified')
 `;
 
@@ -101,6 +108,20 @@ const TOTALS_SQL = `
   FROM invoice i
   WHERE i.creation_date >= ? AND i.creation_date <= ?
     AND i.is_deleted != 1
+    AND ${COUNTED}
+`;
+
+// What the interbranch rule excluded above — invoices operated at this branch
+// for another branch (they count at the source branch). Returned so the screen
+// can show them beside the figures rather than leave the drop unexplained.
+const INTERBRANCH_SQL = `
+  SELECT COUNT(*)                     AS invoices,
+         COUNT(DISTINCT i.patient_id) AS patients,
+         SUM(COALESCE(i.totalamt, 0)) AS amount
+  FROM invoice i
+  WHERE i.creation_date >= ? AND i.creation_date <= ?
+    AND i.is_deleted != 1
+    AND NOT (${COUNTED})
 `;
 
 // Revenue per patient, so surgery type and gender can be attributed by joining
@@ -114,6 +135,7 @@ const PER_PATIENT_SQL = `
   LEFT JOIN patient p ON p.patient_id = i.patient_id
   WHERE i.creation_date >= ? AND i.creation_date <= ?
     AND i.is_deleted != 1
+    AND ${COUNTED}
   GROUP BY i.patient_id, p.sex
 `;
 
@@ -255,7 +277,14 @@ async function getIpdSection({ location, from, to, compare, preset }) {
   }
   const run = makeRunner(connection);
 
-  const current = await gather(run, from, to, true);
+  const [current, ibRows] = await Promise.all([
+    gather(run, from, to, true),
+    run(INTERBRANCH_SQL, [from, to]).catch((e) => {
+      console.error("overview/ipd: interbranch summary failed:", e.message);
+      return null;
+    }),
+  ]);
+  const ib = ibRows?.[0];
   const surgeries = await surgeryRows(run, current.perPatient, to);
 
   let prev = null;
@@ -293,6 +322,14 @@ async function getIpdSection({ location, from, to, compare, preset }) {
     avgPerPatient: current.avgPerPatient,
     byStatus: current.byStatus,
     surgeries,
+    // Excluded from every figure above; null if the lookup failed.
+    interbranch: ib
+      ? {
+          invoices: n0(ib.invoices),
+          patients: n0(ib.patients),
+          amount: Math.round(n0(ib.amount)),
+        }
+      : null,
     prev: prev
       ? {
           cases: prev.cases,

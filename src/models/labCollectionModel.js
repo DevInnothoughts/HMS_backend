@@ -233,7 +233,8 @@ async function getCollectionV4(req) {
 
   // ── grouping ──
   // LAB: one bucket per lab test actually billed in the range.
-  // OPD: the four fixed buckets the screen already knows, rest to OTHER.
+  // OPD: the fixed buckets the screen already knows (MCDPA added), rest to
+  // OTHER.
   const groups =
     section === "LAB"
       ? Array.from(
@@ -247,7 +248,7 @@ async function getCollectionV4(req) {
         )
           .filter(Boolean)
           .sort()
-      : ["CONSULTATION", "PROCTOSCOPY", "FOLLOW-UP", "POSTOPERATIVE"];
+      : ["CONSULTATION", "PROCTOSCOPY", "FOLLOW-UP", "POSTOPERATIVE", "MCDPA"];
 
   const { consultationTotals, consultationPaymentModeTotals } =
     computeAggregates(rows, groups);

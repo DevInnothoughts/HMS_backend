@@ -9,6 +9,7 @@
  * and `note` the actions on the screen have nowhere to write.
  */
 
+const util = require("util");
 const { getConnectionByLocation } = require("../../databaseUtils");
 
 /**
@@ -127,7 +128,24 @@ function readableSource(utmSource) {
  * contain it ("HSR Layout - Bengaluru" for HSR, "Pimpri & Chinchwad" for
  * Chinchwad, and so on).
  */
-async function getCallLeads(location) {
+/** WHERE fragment + params that pick this branch's rows out of call_leads. */
+function locationClause(location) {
+  const aliases = LOCATION_ALIASES[location] || [];
+  const aliasClause = aliases.length
+    ? ` OR LOWER(call_location) IN (${aliases.map(() => "LOWER(?)").join(", ")})`
+    : "";
+  return {
+    sql: `(call_location LIKE CONCAT('%', ?, '%')${aliasClause})`,
+    params: [location, ...aliases],
+  };
+}
+
+/**
+ * With `from` and `to` (YYYY-MM-DD) every lead created in that range is
+ * returned. Without them, the 100 most recent — the original behaviour, kept
+ * for the sync job and any caller that does not send a range.
+ */
+async function getCallLeads(location, { withVisits = true, from, to } = {}) {
   const { connection } = getConnectionByLocation(DB_KEY);
   if (!connection) {
     const err = new Error(`Invalid location: ${location}`);
@@ -135,10 +153,8 @@ async function getCallLeads(location) {
     throw err;
   }
 
-  const aliases = LOCATION_ALIASES[location] || [];
-  const aliasClause = aliases.length
-    ? ` OR LOWER(call_location) IN (${aliases.map(() => "LOWER(?)").join(", ")})`
-    : "";
+  const loc = locationClause(location);
+  const ranged = !!(from && to);
 
   const query = `
     SELECT
@@ -153,14 +169,17 @@ async function getCallLeads(location) {
     FROM call_leads
     WHERE phoneno IS NOT NULL
       AND phoneno <> ''
-      AND (call_location LIKE CONCAT('%', ?, '%')${aliasClause})
+      AND ${loc.sql}
+      ${ranged ? "AND created_at BETWEEN ? AND ?" : ""}
     ORDER BY id DESC
-    LIMIT 100
+    ${ranged ? "" : "LIMIT 100"}
   `;
 
-  const params = [location, ...aliases];
+  const params = ranged
+    ? [...loc.params, `${from} 00:00:00`, `${to} 23:59:59`]
+    : loc.params;
 
-  return new Promise((resolve, reject) => {
+  const rows = await new Promise((resolve, reject) => {
     connection.getConnection(function (err, tempCon) {
       // Guard the release — calling .release() on an undefined connection
       // throws inside the callback and the promise never settles.
@@ -186,6 +205,111 @@ async function getCallLeads(location) {
       });
     });
   });
+
+  if (withVisits) await attachVisitFlags(location, rows);
+  return rows;
+}
+
+/**
+ * Adds `visited` and `ipd` (booleans) to each call lead, so the Web Call Leads
+ * screen can offer the same Visited / IPD filters as Web Leads.
+ *
+ * Same definitions as getDatewiseLeads (web leads):
+ *   visited — an appointment in the branch DB for that phone with
+ *             confirm_time != 0 and patient_type = 'New'
+ *   ipd     — that visited patient has an invoice
+ *
+ * Differences, because call leads have no date range and a different status
+ * history:
+ *   - the visit must be ON OR AFTER the day the lead came in (web leads use
+ *     the screen's from/to range instead)
+ *   - every lead is checked, not only those already marked 'Appointment' —
+ *     a caller can turn up without the status ever being updated
+ *
+ * The response stays a plain array (flags added to each row), so anything
+ * already reading GET /leadManagement/call keeps working.
+ *
+ * A failure here is logged and the leads are returned without flags rather
+ * than failing the whole list.
+ */
+async function attachVisitFlags(location, rows) {
+  rows.forEach((row) => {
+    row.visited = false;
+    row.ipd = false;
+  });
+
+  const phone10 = (p) =>
+    String(p || "")
+      .replace(/\D/g, "")
+      .slice(-10);
+  const phones = [
+    ...new Set(
+      rows.map((r) => phone10(r.phoneno)).filter((p) => p.length === 10),
+    ),
+  ];
+  if (phones.length === 0) return rows;
+
+  const { connection: clinicDB } = getConnectionByLocation(location);
+  if (!clinicDB) return rows;
+
+  try {
+    const clinicQuery = util.promisify(clinicDB.query).bind(clinicDB);
+
+    // patient_phone is stored as ten digits (the web-lead code matches it
+    // exactly), so a plain IN keeps the index usable.
+    const visits = await clinicQuery(
+      `
+        SELECT patient_id, patient_phone, appointment_timestamp
+        FROM appointment
+        WHERE patient_phone IN (?)
+          AND confirm_time != 0
+          AND patient_type = 'New'
+      `,
+      [phones],
+    );
+    if (visits.length === 0) return rows;
+
+    const ipdIds = new Set();
+    const patientIds = [...new Set(visits.map((v) => v.patient_id))];
+    if (patientIds.length > 0) {
+      const invoices = await clinicQuery(
+        `SELECT DISTINCT patient_id FROM invoice WHERE patient_id IN (?)`,
+        [patientIds],
+      );
+      invoices.forEach((i) => ipdIds.add(i.patient_id));
+    }
+
+    // phone → visits, so each lead only looks at its own number.
+    const byPhone = new Map();
+    for (const v of visits) {
+      const k = phone10(v.patient_phone);
+      if (!byPhone.has(k)) byPhone.set(k, []);
+      byPhone.get(k).push(v);
+    }
+
+    const dayStart = (d) => {
+      const x = new Date(d);
+      if (Number.isNaN(x.getTime())) return null;
+      x.setHours(0, 0, 0, 0);
+      return x;
+    };
+
+    for (const row of rows) {
+      const leadDay = dayStart(row.date);
+      const mine = (byPhone.get(phone10(row.phoneno)) || []).filter((v) => {
+        const visitDay = dayStart(v.appointment_timestamp);
+        return !leadDay || !visitDay || visitDay >= leadDay;
+      });
+      if (mine.length > 0) {
+        row.visited = true;
+        row.ipd = mine.some((v) => ipdIds.has(v.patient_id));
+      }
+    }
+  } catch (err) {
+    console.error(`callLeads visit flags (${location}):`, err.message);
+  }
+
+  return rows;
 }
 
 /** Mirrors updateStatus / updateStatusBot. */
@@ -273,10 +397,196 @@ async function getUnmappedCallLocations(knownBranches = []) {
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* Sync                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Marks call leads as converted once the caller has an appointment at the
+ * branch. Same job as syncAppointments (web) and syncBotAppointments (bot) in
+ * leadManagementModel.js:
+ *
+ *   1. take this branch's call leads (getCallLeads — same location matching
+ *      the screen uses, so the sync sees exactly the rows the branch sees)
+ *   2. skip any already at 'Appointment'
+ *   3. look for an appointment in the branch DB for that phone, on or after
+ *      the day the lead came in
+ *   4. if found, set status = 'Appointment' and write the note
+ *
+ * Two deliberate differences from the web/bot versions:
+ *
+ *  - PHONE: compared on the last ten digits. The bot version strips a leading
+ *    /^(\+91|91|0)/, which also eats the "91" of a plain ten-digit number that
+ *    happens to start with 91 (9123456789 → 23456789) and never matches.
+ *
+ *  - DATE: appointment_timestamp is a DATE column and created_at is a
+ *    DATETIME. Comparing them directly drops a same-day booking
+ *    ('2026-09-26' < '2026-09-26 14:05'), so the lead's date is cut to DATE().
+ */
+async function syncCallAppointments(location) {
+  const { connection: leadsDB } = getConnectionByLocation(DB_KEY);
+  const { connection: clinicDB } = getConnectionByLocation(location);
+  if (!leadsDB || !clinicDB) {
+    const err = new Error(`Invalid location: ${location}`);
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    console.log("🔄Call Lead Sync started at", new Date().toLocaleString());
+
+    const leads = await getCallLeads(location, { withVisits: false });
+
+    if (leads.length === 0) {
+      console.log("✅ No unsynced Call leads found.");
+      return;
+    }
+
+    const clinicQuery = util.promisify(clinicDB.query).bind(clinicDB);
+    const leadsQuery = util.promisify(leadsDB.query).bind(leadsDB);
+
+    for (const lead of leads) {
+      // getCallLeads aliases id → appointment_id and created_at → date.
+      const { appointment_id, phoneno, date, status } = lead;
+
+      if (!phoneno || status === "Appointment") continue;
+
+      const phone10 = String(phoneno).replace(/\D/g, "").slice(-10);
+      if (phone10.length !== 10) continue;
+
+      const rows = await clinicQuery(
+        `
+          SELECT patient_phone, appointment_timestamp
+          FROM appointment
+          WHERE
+            RIGHT(patient_phone, 10) = ?
+            AND appointment_timestamp >= DATE(?)
+          ORDER BY appointment_timestamp ASC
+          LIMIT 1
+        `,
+        [phone10, date],
+      );
+
+      if (rows && rows.length > 0) {
+        const match = rows[0];
+        const appointmentDate = new Date(
+          match.appointment_timestamp,
+        ).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" });
+        const note = `Appointment booked on ${appointmentDate} and synchronised successfully.`;
+
+        await leadsQuery(
+          `
+          UPDATE call_leads
+          SET status = 'Appointment', note = ?
+          WHERE id = ?
+        `,
+          [note, appointment_id],
+        );
+        console.log(
+          `✅Call Lead Synced ${location}: ${phoneno} → status updated.`,
+        );
+      }
+    }
+
+    console.log("🔁Call Lead Sync completed at", new Date().toLocaleString());
+  } catch (err) {
+    console.error("❌ Error during Call Lead sync:", err.message);
+  }
+}
+
+/**
+ * Funnel counts for the Leads & Calls dashboard ("Web call" row), in the
+ * shape leadsStatsModel returns for web / chatbot / IVR:
+ *   { total, appointment, actualVisitCount, ipd }
+ *
+ * - total is EVERY call_leads row created in [from, to] (matches the screen);
+ *   the other stages are one per phone (last ten digits)
+ * - appointment: any of that phone's rows has status 'Appointment'
+ * - visited / ipd: attachVisitFlags — a confirmed new-patient visit on or
+ *   after the lead's day, and an invoice for that patient
+ */
+/** call_leads rows for one branch created in [from, to]. */
+async function fetchCallLeadsInRange(location, from, to) {
+  const { connection } = getConnectionByLocation(DB_KEY);
+  if (!connection) {
+    const err = new Error(`Invalid location: ${location}`);
+    err.status = 404;
+    throw err;
+  }
+
+  const loc = locationClause(location);
+  const query = `
+    SELECT id AS appointment_id, created_at AS date, phoneno, status
+    FROM call_leads
+    WHERE phoneno IS NOT NULL
+      AND phoneno <> ''
+      AND ${loc.sql}
+      AND created_at BETWEEN ? AND ?
+    ORDER BY id DESC
+  `;
+  const params = [...loc.params, `${from} 00:00:00`, `${to} 23:59:59`];
+
+  return new Promise((resolve, reject) => {
+    connection.getConnection(function (err, tempCon) {
+      if (err) {
+        if (tempCon) tempCon.release();
+        return reject(err);
+      }
+      tempCon.query(query, params, function (error, result) {
+        tempCon.release();
+        if (error) return reject(error);
+        resolve(result);
+      });
+    });
+  });
+}
+
+async function getCallLeadStats(location, from, to) {
+  const rows = await fetchCallLeadsInRange(location, from, to);
+
+  const phone10 = (p) =>
+    String(p || "")
+      .replace(/\D/g, "")
+      .slice(-10);
+  const byPhone = new Map();
+  for (const r of rows) {
+    const k = phone10(r.phoneno) || `id-${r.appointment_id}`;
+    const seen = byPhone.get(k);
+    if (!seen) byPhone.set(k, { ...r });
+    else if (r.status === "Appointment") seen.status = "Appointment";
+  }
+  const leads = [...byPhone.values()];
+
+  await attachVisitFlags(location, leads);
+
+  return {
+    // Every request, matching the Web Call Leads screen's count. Booked /
+    // visited / IPD stay one per phone — a person books once however many
+    // times they asked for a call.
+    total: rows.length,
+    appointment: leads.filter((l) => l.status === "Appointment").length,
+    actualVisitCount: leads.filter((l) => l.visited).length,
+    ipd: leads.filter((l) => l.ipd).length,
+  };
+}
+
+/**
+ * Lead COUNT only (Home screen): EVERY call-back request in the range, the
+ * same rows the Web Call Leads screen lists — a number that asked twice is
+ * two requests.
+ */
+async function getCallLeadCount(location, from, to) {
+  const rows = await fetchCallLeadsInRange(location, from, to);
+  return rows.length;
+}
+
 module.exports = {
   getCallLeads,
+  getCallLeadStats,
+  getCallLeadCount,
   updateStatusCall,
   getUnmappedCallLocations,
+  syncCallAppointments,
   LOCATION_ALIASES,
   inferTreatment,
 };

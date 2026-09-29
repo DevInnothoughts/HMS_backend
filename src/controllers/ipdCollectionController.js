@@ -15,6 +15,7 @@ const {
   getIPDBillsV3,
   getIHXData,
   getIPDBillsV4,
+  getIPDBillsV5,
 } = require("../models/ipdCollectionModel");
 
 router.get("/", async (req, res, next) => {
@@ -126,6 +127,13 @@ router.get("/billsV3", async (req, res, next) => {
 
 router.get("/billsV4", (req, res, next) =>
   getIPDBillsV4(req)
+    .then((d) => res.json(d))
+    .catch(next),
+);
+
+// V4 + interbranch: operating-branch copies are listed but excluded from totals.
+router.get("/billsV5", (req, res, next) =>
+  getIPDBillsV5(req)
     .then((d) => res.json(d))
     .catch(next),
 );

@@ -42,6 +42,7 @@ const {
   getLabRevenue,
   getLabConsultationNames,
 } = require("../targetComparisonNewModel");
+const { countedSql } = require("../utils/interbranch");
 
 const round0 = (n) => Math.round(Number(n) || 0);
 const n0 = (v) => Number(v) || 0;
@@ -97,16 +98,33 @@ async function getOpdLabPatients(run, from, to, labNames) {
   };
 }
 
-/** Distinct IPD patients — same filter getLocationSummary's ipdInvoice uses. */
-async function getIpdPatients(run, from, to) {
+/**
+ * IPD billed amount AND distinct patients, with the interbranch rule applied
+ * (utils/interbranch.js): an operating-branch copy of an interbranch invoice
+ * belongs to the source branch, so it is left out of both.
+ *
+ * The amount used to be getLocationSummary().ipdInvoice.total, which counts
+ * every invoice. That function also feeds the report mail, so it is left
+ * alone and the IPD slice is computed here instead.
+ */
+async function getIpdBilling(run, from, to) {
   const [row] = await run(
-    `SELECT COUNT(DISTINCT patient_id) AS cnt
-       FROM invoice
-      WHERE creation_date >= ? AND creation_date <= ?
-        AND is_deleted != 1`,
+    `SELECT COUNT(DISTINCT CASE WHEN ${countedSql("i")} THEN i.patient_id END) AS cnt,
+            COALESCE(SUM(CASE WHEN ${countedSql("i")} THEN i.totalamt ELSE 0 END), 0) AS amount,
+            SUM(CASE WHEN ${countedSql("i")} THEN 0 ELSE 1 END)                AS ib_cnt,
+            COALESCE(SUM(CASE WHEN ${countedSql("i")} THEN 0 ELSE i.totalamt END), 0) AS ib_amount
+       FROM invoice i
+      WHERE i.creation_date >= ? AND i.creation_date <= ?
+        AND i.is_deleted != 1`,
     [`${from} 00:00:00`, `${to} 23:59:59`],
   );
-  return n0(row?.cnt);
+  return {
+    patients: n0(row?.cnt),
+    amount: n0(row?.amount),
+    // Excluded interbranch invoices (operated here for another branch).
+    interbranchCount: n0(row?.ib_cnt),
+    interbranchAmount: n0(row?.ib_amount),
+  };
 }
 
 /**
@@ -200,7 +218,7 @@ async function getCollection(location, from, to) {
     return [];
   });
 
-  const [summary, labRaw, opdLab, ipdPatients, pharmacyInvoices] =
+  const [summary, labRaw, opdLab, ipdBilling, pharmacyInvoices] =
     await Promise.all([
       getLocationSummary(location, from, to),
       getLabRevenue(location, from, to).catch((e) => {
@@ -217,9 +235,9 @@ async function getCollection(location, from, to) {
         );
         return { opdPatients: null, labPatients: null };
       }),
-      getIpdPatients(run, from, to).catch((e) => {
+      getIpdBilling(run, from, to).catch((e) => {
         console.error(
-          `overview: IPD patients failed for ${location}:`,
+          `overview: IPD billing failed for ${location}:`,
           e.message,
         );
         return null;
@@ -236,10 +254,17 @@ async function getCollection(location, from, to) {
   const lab = round0(labRaw);
   const opdGross = round0(summary?.opd?.total);
   const opd = Math.max(0, opdGross - lab); // see note 1 above
-  const ipd = round0(summary?.ipdInvoice?.total);
+  // Interbranch-aware. Falls back to the summary figure only if the query
+  // itself failed, so the block still renders.
+  const ipd = round0(
+    ipdBilling ? ipdBilling.amount : summary?.ipdInvoice?.total,
+  );
+  const ipdPatients = ipdBilling ? ipdBilling.patients : null;
   const pharmacy = round0(summary?.pharmacy?.total);
 
-  const total = opd + ipd + pharmacy + lab; // === summary.grandTotal
+  // No longer === summary.grandTotal: IPD here excludes interbranch
+  // operating-branch copies (see getIpdBilling).
+  const total = opd + ipd + pharmacy + lab;
   const pctOf = (n) => (total > 0 ? Math.round((n / total) * 100) : 0);
 
   // Null rather than 0 when there is no divisor — an average of ₹0 reads as a
@@ -256,6 +281,13 @@ async function getCollection(location, from, to) {
       count: ipdPatients,
       countBasis: "patients",
       avg: avgOf(ipd, ipdPatients),
+      // Shown under the IPD row so the lower figure explains itself.
+      interbranch: ipdBilling
+        ? {
+            count: ipdBilling.interbranchCount,
+            amount: round0(ipdBilling.interbranchAmount),
+          }
+        : null,
     },
     {
       key: "opd",

@@ -393,4 +393,41 @@ async function getUnmappedHexaAreas(
   });
 }
 
-module.exports = { getPartnerLeads, getUnmappedHexaAreas, HEXA_AREA_ALIASES };
+/**
+ * Partner lead COUNT only (Home screen): the same rows and the same
+ * within-source de-duplication as getPartnerLeads, without the clinic-side
+ * conversion lookup.
+ */
+async function getPartnerLeadCount(location, fromDate, toDate) {
+  const { connection: leadDB } = getConnectionByLocation("lead");
+  if (!leadDB) {
+    const err = new Error("Invalid location: " + location);
+    err.status = 404;
+    throw err;
+  }
+  const query = util.promisify(leadDB.query).bind(leadDB);
+  const [sulekha, hexa] = await Promise.all([
+    fetchSulekha(query, fromDate, toDate),
+    fetchHexa(query, fromDate, toDate, location),
+  ]);
+  const count = (rows) => {
+    const seen = new Set();
+    let n = 0;
+    for (const r of rows) {
+      if (!r._phone) n++;
+      else if (!seen.has(r._phone)) {
+        seen.add(r._phone);
+        n++;
+      }
+    }
+    return n;
+  };
+  return count(sulekha) + count(hexa);
+}
+
+module.exports = {
+  getPartnerLeads,
+  getPartnerLeadCount,
+  getUnmappedHexaAreas,
+  HEXA_AREA_ALIASES,
+};

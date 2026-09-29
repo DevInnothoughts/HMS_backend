@@ -9,6 +9,26 @@
  * Same cell styling as the in-app export (src/screens/feedbackExcel.js), so the
  * two files read as the same family of document.
  *
+ * ── Calculations — identical to the Patient Feedback screen ─────────────────
+ *   Per patient
+ *     Recommend score  0–10, from ipdFeedback (recommendScore / netPromoterScore
+ *                      / nps — same field order as ipdFeedbackModel)
+ *     Band             9–10 promoter · 7–8 passive · 0–6 detractor
+ *     PSI %            totalScoreAchieved ÷ maxPossibleScore × 100, rounded
+ *                      (never the stored `psi`, which is the raw score)
+ *   Per branch
+ *     NPS              computeNps(summary.scoreCounts, summary.operated) — the
+ *                      same function as src/design/components/NpsBlock.js:
+ *                      %promoters − %detractors over the 0–10 distribution,
+ *                      with a 95% ± margin and finite-population correction
+ *     Avg PSI          mean of per-patient PSI % (patients who have a PSI)
+ *     Response rate    responses ÷ operated
+ *   All branches
+ *     NPS              computeNps on the POOLED score distribution, population
+ *                      = total operated — never an average of branch NPS
+ *     Avg PSI          mean of every patient's PSI % across all branches —
+ *                      the same rule as a branch, applied to the pooled set
+ *
  * ── Place this file in temp/ ────────────────────────────────────────────────
  * (alongside tmp_generateOpdReport_Jan_Jul.js etc.) because it requires
  * ../src/models/overview/ipdFeedbackModel, which resolves ../../databaseUtils
@@ -253,12 +273,75 @@ const npsStyle = (v) => {
   };
 };
 
+/* ── NPS — a line-for-line port of NpsBlock.computeNps ──────────────────── */
+// The app's version lives in React Native code this script cannot require.
+// Keep the two identical: if one changes, change the other, or the workbook and
+// the screen will show different numbers for the same branch.
+//
+//   counts      11 counts, index = score 0–10
+//   population  how many COULD have responded (operated), for the correction
+const computeNps = (counts = [], population = null) => {
+  const c = Array.from({ length: 11 }, (_, i) => Number(counts[i]) || 0);
+  const n = c.reduce((a, b) => a + b, 0);
+  if (n === 0) return null;
+
+  const detractors = c.slice(0, 7).reduce((a, b) => a + b, 0);
+  const passives = c[7] + c[8];
+  const promoters = c[9] + c[10];
+
+  const p = promoters / n;
+  const d = detractors / n;
+  const nps = (p - d) * 100;
+
+  // Variance of (promoter − detractor) as a single random variable.
+  const variance = p + d - Math.pow(p - d, 2);
+  let se = Math.sqrt(Math.max(variance, 0) / n);
+
+  // Finite population correction — surveying most of a small population
+  // genuinely leaves less room for error.
+  if (population && population > n && population > 1) {
+    se *= Math.sqrt((population - n) / (population - 1));
+  }
+
+  return {
+    n,
+    population,
+    detractors,
+    passives,
+    promoters,
+    detractorPct: d * 100,
+    passivePct: (passives / n) * 100,
+    promoterPct: p * 100,
+    nps,
+    margin: 1.96 * se * 100, // 95%
+    counts: c,
+  };
+};
+
+// Avg PSI exactly as ipdFeedbackModel computes summary.psiAvg: the mean of the
+// per-patient PSI % over patients who HAVE one. Used for the pooled total, where
+// there is no model summary to read.
+const avgPsi = (patients) => {
+  const v = patients.filter((p) => p.psiPct != null).map((p) => p.psiPct);
+  return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null;
+};
+
+// Signed display, as the screen shows it: +62, 0, −15.
+const npsText = (v) => (v == null ? null : Math.round(v));
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 const BAND_LABEL = {
   promoter: "Promoter",
   passive: "Passive",
   detractor: "Detractor",
+};
+
+// Per-patient band — the thresholds computeNps uses (0–6 / 7–8 / 9–10).
+const bandOf = (v) => {
+  const n = Number(v);
+  if (v == null || !Number.isFinite(n)) return null;
+  return n >= 9 ? "promoter" : n >= 7 ? "passive" : "detractor";
 };
 
 const MONTHS = [
@@ -305,11 +388,16 @@ function summarySheet(results, from, to) {
     "Responses",
     "Response %",
     "NPS",
+    "± (95%)",
     "Promoters",
+    "Promoter %",
     "Passives",
+    "Passive %",
     "Detractors",
+    "Detractor %",
     "Avg PSI",
   ];
+  const LAST = head.length - 1;
 
   const rows = [
     [mk("Patient Feedback — All Branches", ST_TITLE)],
@@ -318,85 +406,86 @@ function summarySheet(results, from, to) {
     head.map((h) => mk(h, ST_HEAD)),
   ];
 
-  const tot = {
-    operated: 0,
-    responses: 0,
-    promoters: 0,
-    passives: 0,
-    detractors: 0,
-    psiSum: 0,
-    psiCount: 0,
+  // Pooled across branches: the raw 0–10 distribution and every patient, so the
+  // total is computed by the same rules as a branch rather than averaged.
+  const pooledCounts = Array(11).fill(0);
+  const pooledPatients = [];
+  let pooledOperated = 0;
+
+  const pctCell = (v, style) =>
+    v == null
+      ? mk("—", ST_DASH)
+      : mk(Math.round(v) / 100, { ...style, numFmt: "0%" });
+
+  const npsRow = (label, nps, operated, psi, alt, isTotal) => {
+    const base = isTotal ? ST_TOTAL : alt ? ST_LABEL_ALT : ST_LABEL;
+    const ctr = isTotal
+      ? ST_TOTAL_NUM
+      : centred(alt ? { fill: { fgColor: { rgb: ZEBRA } } } : {});
+    const responses = nps?.n ?? 0;
+    return [
+      mk(label, base),
+      mk(operated, ctr),
+      mk(responses, ctr),
+      operated > 0
+        ? mk(Math.round((responses / operated) * 100), {
+            ...ctr,
+            numFmt: '0"%"',
+          })
+        : mk("—", ST_DASH),
+      nps == null ? mk("—", ST_DASH) : mk(npsText(nps.nps), npsStyle(nps.nps)),
+      nps == null
+        ? mk("—", ST_DASH)
+        : mk(`± ${Math.round(nps.margin)}`, {
+            ...ctr,
+            font: { sz: 10, color: { rgb: "6C7C75" } },
+          }),
+      mk(nps?.promoters ?? 0, ctr),
+      pctCell(nps?.promoterPct, ctr),
+      mk(nps?.passives ?? 0, ctr),
+      pctCell(nps?.passivePct, ctr),
+      mk(nps?.detractors ?? 0, ctr),
+      pctCell(nps?.detractorPct, ctr),
+      psi == null ? mk("—", ST_DASH) : mk(psi, psiStyle(psi, alt && !isTotal)),
+    ];
   };
 
   results
     .filter((r) => r.ok)
     .sort((a, b) => a.branch.localeCompare(b.branch))
     .forEach((r, i) => {
-      const s = r.data.summary;
-      const alt = i % 2 === 1;
-      const base = alt ? ST_LABEL_ALT : ST_LABEL;
-      const ctr = centred(alt ? { fill: { fgColor: { rgb: ZEBRA } } } : {});
+      const s = r.data.summary || {};
+      const operated = s.operated || 0;
+      const nps = computeNps(s.scoreCounts, operated);
 
-      tot.operated += s.operated || 0;
-      tot.responses += s.responses || 0;
-      tot.promoters += s.promoters || 0;
-      tot.passives += s.passives || 0;
-      tot.detractors += s.detractors || 0;
-      if (s.psiAvg != null) {
-        // Weighted by responses — a branch with two replies should not swing
-        // the group average as hard as one with sixty.
-        tot.psiSum += s.psiAvg * (s.responses || 0);
-        tot.psiCount += s.responses || 0;
-      }
+      (s.scoreCounts || []).forEach(
+        (c, k) => (pooledCounts[k] += Number(c) || 0),
+      );
+      pooledPatients.push(...(r.data.patients || []));
+      pooledOperated += operated;
 
-      rows.push([
-        mk(r.branch, base),
-        mk(s.operated ?? 0, ctr),
-        mk(s.responses ?? 0, ctr),
-        s.responseRatePct == null
-          ? mk("—", ST_DASH)
-          : mk(s.responseRatePct, { ...ctr, numFmt: '0"%"' }),
-        s.nps == null ? mk("—", ST_DASH) : mk(s.nps, npsStyle(s.nps)),
-        mk(s.promoters ?? 0, ctr),
-        mk(s.passives ?? 0, ctr),
-        mk(s.detractors ?? 0, ctr),
-        s.psiAvg == null
-          ? mk("—", ST_DASH)
-          : mk(s.psiAvg, psiStyle(s.psiAvg, alt)),
-      ]);
+      // Branch Avg PSI straight from the model — the figure the screen shows.
+      rows.push(
+        npsRow(r.branch, nps, operated, s.psiAvg ?? null, i % 2 === 1, false),
+      );
     });
 
-  // Group NPS is recomputed from the POOLED bands. Averaging branch NPS values
-  // would weight a 3-response branch the same as a 60-response one.
-  const n = tot.promoters + tot.passives + tot.detractors;
-  const groupNps =
-    n > 0 ? Math.round(((tot.promoters - tot.detractors) / n) * 100) : null;
-  const groupPsi =
-    tot.psiCount > 0 ? Math.round(tot.psiSum / tot.psiCount) : null;
-
-  rows.push([
-    mk("ALL BRANCHES", ST_TOTAL),
-    mk(tot.operated, ST_TOTAL_NUM),
-    mk(tot.responses, ST_TOTAL_NUM),
-    tot.operated > 0
-      ? mk(Math.round((tot.responses / tot.operated) * 100), {
-          ...ST_TOTAL_NUM,
-          numFmt: '0"%"',
-        })
-      : mk("—", ST_DASH),
-    groupNps == null ? mk("—", ST_DASH) : mk(groupNps, npsStyle(groupNps)),
-    mk(tot.promoters, ST_TOTAL_NUM),
-    mk(tot.passives, ST_TOTAL_NUM),
-    mk(tot.detractors, ST_TOTAL_NUM),
-    groupPsi == null ? mk("—", ST_DASH) : mk(groupPsi, psiStyle(groupPsi)),
-  ]);
+  const groupNps = computeNps(pooledCounts, pooledOperated);
+  const groupPsi = avgPsi(pooledPatients);
+  rows.push(
+    npsRow("ALL BRANCHES", groupNps, pooledOperated, groupPsi, false, true),
+  );
 
   rows.push([]);
   rows.push([
     mk(
-      "NPS = % promoters − % detractors, pooled across branches rather than averaged. " +
-        "PSI = total score achieved ÷ maximum possible × 100, weighted by responses. " +
-        "Bands: promoter 9–10, passive 7–8, detractor 0–6.",
+      "NPS = % promoters (9–10) − % detractors (0–6) over the 0–10 recommend-score " +
+        "distribution; passives (7–8) count in the total but not the score. " +
+        "± is the 95% confidence interval, corrected for the number operated. " +
+        "PSI = total score achieved ÷ maximum possible × 100 per patient; Avg PSI is " +
+        "the mean over patients who have one. ALL BRANCHES pools every response and " +
+        "every patient — it is not an average of the branch rows. " +
+        "Same calculations as the Patient Feedback screen.",
       ST_NOTE,
     ),
   ]);
@@ -420,26 +509,41 @@ function summarySheet(results, from, to) {
     { wch: 11 },
     { wch: 11 },
     { wch: 8 },
-    { wch: 11 },
+    { wch: 9 },
     { wch: 10 },
+    { wch: 11 },
+    { wch: 9 },
+    { wch: 10 },
+    { wch: 11 },
     { wch: 11 },
     { wch: 10 },
   ];
   ws["!rows"] = [{ hpt: 26 }, { hpt: 18 }];
+  const noteRow = rows.findIndex(
+    (r) => r[0]?.v && String(r[0].v).startsWith("NPS = %"),
+  );
   ws["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 8 } },
+    { s: { r: 0, c: 0 }, e: { r: 0, c: LAST } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: LAST } },
+    ...(noteRow >= 0
+      ? [{ s: { r: noteRow, c: 0 }, e: { r: noteRow, c: LAST } }]
+      : []),
   ];
+  if (noteRow >= 0) ws["!rows"][noteRow] = { hpt: 54 };
   ws["!freeze"] = { xSplit: 1, ySplit: 4 };
   return ws;
 }
 
 /* ── Per-branch sheet ────────────────────────────────────────────────────── */
 
-function branchSheet(data) {
+function branchSheet(data, branch) {
   const patients = data.patients || [];
   const responders = patients.filter((p) => p.responded);
   const pending = patients.filter((p) => !p.responded);
+
+  // Branch figures — same inputs and function as the Patient Feedback screen.
+  const s = data.summary || {};
+  const nps = computeNps(s.scoreCounts, s.operated);
 
   // Question columns are read off the first response rather than hardcoded, so
   // an added question appears in the export without a code change here.
@@ -457,9 +561,9 @@ function branchSheet(data) {
     "Surgery date",
     "Surgeon",
     "Room type",
-    "Score",
+    "Recommend (0–10)",
     "Band",
-    "PSI",
+    "PSI %",
     "Achieved",
     "Max",
     ...qCols.map((c) => c.label),
@@ -470,7 +574,100 @@ function branchSheet(data) {
     ...qCols.map((c) => mk(c.group, ST_GROUP)),
   ];
 
+  const metric = (label, value, style, alt) => [
+    mk(label, alt ? ST_LABEL_ALT : ST_LABEL),
+    value == null ? mk("—", ST_DASH) : mk(value, style),
+  ];
+  const ctrA = (alt) =>
+    centred(alt ? { fill: { fgColor: { rgb: ZEBRA } } } : {});
+  const pctOf = (v) => (v == null ? null : Math.round(v) / 100);
+
+  const top = [
+    [mk(`Patient Feedback — ${branch}`, ST_TITLE)],
+    [
+      mk(
+        `${fmtDate(data.meta?.from)} to ${fmtDate(data.meta?.to)}`,
+        ST_SUBTITLE,
+      ),
+    ],
+    [],
+    [mk("BRANCH SUMMARY", ST_GROUP), mk("", ST_GROUP), mk("", ST_GROUP)],
+    metric("Patients operated", s.operated ?? 0, ctrA(false), false),
+    metric("Responses received", s.responses ?? 0, ctrA(true), true),
+    metric(
+      "Response rate",
+      s.responseRatePct ?? null,
+      { ...ctrA(false), numFmt: '0"%"' },
+      false,
+    ),
+    [
+      mk("NPS", ST_LABEL_ALT),
+      nps == null ? mk("—", ST_DASH) : mk(npsText(nps.nps), npsStyle(nps.nps)),
+      nps == null
+        ? mk("", ST_LABEL_ALT)
+        : mk(`± ${Math.round(nps.margin)}`, {
+            ...ctrA(true),
+            font: { sz: 10, color: { rgb: "6C7C75" } },
+          }),
+    ],
+    [
+      mk("Promoters (9–10)", ST_LABEL),
+      mk(nps?.promoters ?? 0, ctrA(false)),
+      nps == null
+        ? mk("", ST_LABEL)
+        : mk(pctOf(nps.promoterPct), { ...ctrA(false), numFmt: "0%" }),
+    ],
+    [
+      mk("Passives (7–8)", ST_LABEL_ALT),
+      mk(nps?.passives ?? 0, ctrA(true)),
+      nps == null
+        ? mk("", ST_LABEL_ALT)
+        : mk(pctOf(nps.passivePct), { ...ctrA(true), numFmt: "0%" }),
+    ],
+    [
+      mk("Detractors (0–6)", ST_LABEL),
+      mk(nps?.detractors ?? 0, ctrA(false)),
+      nps == null
+        ? mk("", ST_LABEL)
+        : mk(pctOf(nps.detractorPct), { ...ctrA(false), numFmt: "0%" }),
+    ],
+    metric(
+      "Avg PSI",
+      s.psiAvg ?? null,
+      s.psiAvg == null ? ST_DASH : psiStyle(s.psiAvg, true),
+      true,
+    ),
+    [],
+    // The distribution the score is built from — the same NPS can come from
+    // everyone at 8 or half at 10 and half at 4.
+    [
+      mk("RESPONSES BY SCORE", ST_GROUP),
+      mk("Count", ST_GROUP),
+      mk("Share", ST_GROUP),
+    ],
+    ...(nps
+      ? nps.counts.map((count, score) => {
+          const alt = score % 2 === 1;
+          return [
+            mk(String(score), alt ? ST_LABEL_ALT : ST_LABEL),
+            mk(count, {
+              ...ctrA(alt),
+              font: {
+                bold: count > 0,
+                sz: 10,
+                color: { rgb: score >= 9 ? GREEN : score >= 7 ? AMBER : RED },
+              },
+            }),
+            mk(count > 0 ? count / nps.n : 0, { ...ctrA(alt), numFmt: "0%" }),
+          ];
+        })
+      : [[mk("No responses", ST_LABEL)]]),
+    [],
+  ];
+  const headerRow = top.length + 2; // index of the column-header row below
+
   const rows = [
+    ...top,
     [mk("RESPONSES", ST_GROUP)],
     bandRow,
     head.map((h) => mk(h, ST_HEAD)),
@@ -497,7 +694,10 @@ function branchSheet(data) {
       p.recommendScore == null
         ? mk("—", ST_DASH)
         : mk(p.recommendScore, scoreStyle(p.recommendScore, alt)),
-      mk(p.band ? BAND_LABEL[p.band] : "—", ctr),
+      mk(
+        bandOf(p.recommendScore) ? BAND_LABEL[bandOf(p.recommendScore)] : "—",
+        ctr,
+      ),
       p.psiPct == null
         ? mk("—", ST_DASH)
         : mk(p.psiPct, psiStyle(p.psiPct, alt)),
@@ -560,8 +760,14 @@ function branchSheet(data) {
     { wch: 6 },
     ...qCols.map(() => ({ wch: 11 })),
   ];
-  ws["!freeze"] = { xSplit: 2, ySplit: 3 };
-  ws["!rows"] = [{ hpt: 18 }, { hpt: 18 }, { hpt: 30 }];
+  // Freeze through the response-table header so names stay in view.
+  ws["!freeze"] = { xSplit: 2, ySplit: headerRow + 1 };
+  ws["!rows"] = [{ hpt: 26 }, { hpt: 18 }];
+  ws["!rows"][headerRow] = { hpt: 30 };
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+  ];
   return ws;
 }
 
@@ -619,7 +825,7 @@ async function generateAllBranchFeedbackExcel(options = {}) {
     .forEach((r) => {
       xlsx.utils.book_append_sheet(
         wb,
-        branchSheet(r.data),
+        branchSheet(r.data, r.branch),
         sheetName(r.branch, used),
       );
     });

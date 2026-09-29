@@ -26,6 +26,13 @@
 
 const { getConnectionByLocation } = require("../../databaseUtils");
 const { isSurgeryAdvised } = require("./adviceUtils");
+const { countedSql } = require("./utils/interbranch");
+
+// Interbranch rule (utils/interbranch.js): an operating-branch copy of an
+// interbranch invoice belongs to the SOURCE branch, so it does not count as a
+// surgery / conversion here. Tables are unaliased in these subqueries, so the
+// rule is qualified with the table name.
+const COUNTED_INV = countedSql("invoice");
 
 const makeRunner =
   (connection) =>
@@ -159,7 +166,7 @@ async function getConvincingInsights(req) {
   const invoiceSql = `
     SELECT DISTINCT patient_id
     FROM invoice
-    WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1
+    WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1 AND ${COUNTED_INV}
   `;
 
   const [newApptRows, diagRows, invoiceRows] = await Promise.all([
@@ -183,7 +190,7 @@ async function getConvincingInsights(req) {
            LEFT JOIN doctor c ON c.doctor_id = d.consultantDoctor
           WHERE d.patient_id IN (
             SELECT patient_id FROM invoice
-            WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1
+            WHERE creation_date >= ? AND creation_date <= ? AND is_deleted != 1 AND ${COUNTED_INV}
           )
           GROUP BY d.patient_id`,
         [from, to],

@@ -4,15 +4,252 @@ const {
   processPerformanceSummary,
 } = require("./openAIModel");
 
+// -- Web leads (`appointments` table, lead DB) -------------------------------
+// This whole section exists because two things about `appointments` are not
+// what they look like. Both were confirmed against live data, not assumed:
+//
+//   1. `date` is free-text VARCHAR with MIXED formats - some rows hold a JS
+//      Date.toString() ("Tue Sep 22 2026 14:32:20 GMT+0530 (India Standard
+//      Time)"), others ISO-8601. No single SQL expression reads both, so the
+//      parsing happens in JS. See istMonthKey() below.
+//
+//   2. `selected_area` is free text typed into the website form ("Pimpri &
+//      Chinchwad", "Pune - Dhole Patil Road", "Hyderabad " with a trailing
+//      space, "LUDHIANA"), and the branch name the app sends never matches it
+//      literally. Both sides are normalised before comparison. See
+//      buildAreaWhere() below.
+//
+// Symptom when either is got wrong: the chart reads 0 rather than erroring,
+// because a NULL month silently fails to fill its bucket.
+
+const MONTH_ABBR = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+const FY_START_MONTH = 3; // April, 0-indexed
+
+// 'YYYY-MM' key for a (year, 0-indexed month) pair, normalising overflow.
+const ymKey = (year, monthIdx) => {
+  const y = year + Math.floor(monthIdx / 12);
+  const m = ((monthIdx % 12) + 12) % 12;
+  return `${y}-${String(m + 1).padStart(2, "0")}`;
+};
+
+// The FY a date belongs to, named by its starting year (Apr 2026 -> 2026).
+const fyStartYear = (d) =>
+  d.getMonth() >= FY_START_MONTH ? d.getFullYear() : d.getFullYear() - 1;
+
+// -- Reading dates out of `appointments` ------------------------------------
+// `appointments.date` is free-text VARCHAR with MIXED formats. Real values:
+//   "Tue Sep 22 2026 14:32:20 GMT+0530 (India Standard Time)"   <- JS toString
+//   "2026-09-22T14:32:20+05:30"                                 <- ISO-8601
+// No MySQL date function or string slice can read both, which is why every
+// SQL-side approach to this column returns NULL or matches nothing:
+//   DATE_FORMAT / YEAR / MONTH / STR_TO_DATE -> NULL on the toString rows
+//   LEFT(`date`, 7)                          -> "Tue Sep"
+//   `date` < '2026-10-01'                    -> false ('T' sorts after '2')
+// So the rows are fetched raw and parsed with JS `new Date()`, which reads
+// both shapes (and a real Date object, if the column is ever migrated).
+//
+// The bucket is the IST calendar month: the parsed instant is shifted by
+// +05:30 and read in UTC, so a late-evening IST lead lands in the right month
+// whatever the server's own time zone is.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function istMonthKey(rawDate) {
+  if (rawDate == null) return null;
+  const parsed = rawDate instanceof Date ? rawDate : new Date(String(rawDate));
+  if (Number.isNaN(parsed.getTime())) return null;
+  const ist = new Date(parsed.getTime() + IST_OFFSET_MS);
+  return (
+    ist.getUTCFullYear() + "-" + String(ist.getUTCMonth() + 1).padStart(2, "0")
+  );
+}
+
+// One query per request -> Map<'YYYY-MM', count>. Every web-lead series below
+// is derived from it. Only the date column is selected, and the area filter
+// keeps this to a few thousand rows per branch.
+async function fetchWebLeadMonthlyCounts(
+  leadConnection,
+  areaConditions,
+  areaParams,
+) {
+  const rows = await runLeadQuery(
+    leadConnection,
+    "SELECT `date` FROM appointments WHERE (" + areaConditions + ")",
+    [...areaParams],
+  );
+
+  const map = new Map();
+  let unparseable = 0;
+  (rows || []).forEach((r) => {
+    const key = istMonthKey(r.date);
+    if (!key) {
+      unparseable++;
+      return;
+    }
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+
+  map.rowCount = (rows || []).length;
+  map.unparseable = unparseable;
+  return map;
+}
+
+// Last `count` months ending with the current month, shifted back `yearsBack`
+// years. Shape matches the old SQL: [{ label: 'Apr', value: n }, ...]
+function webMonthlySeries(map, count, yearsBack, now = new Date()) {
+  const out = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const monthIdx = now.getMonth() - i;
+    const year = now.getFullYear() - yearsBack;
+    const key = ymKey(year, monthIdx);
+    out.push({
+      label: MONTH_ABBR[Number(key.slice(5, 7)) - 1],
+      value: map.get(key) || 0,
+    });
+  }
+  return out;
+}
+
+// FY quarters Q1=Apr-Jun .. Q4=Jan-Mar. `capYm` (exclusive 'YYYY-MM') stops the
+// running FY at the current month, so future quarters come back as 0.
+function webQuarterlySeries(map, fyStart, capYm) {
+  const out = [];
+  for (let q = 1; q <= 4; q++) {
+    let value = 0;
+    for (let k = 0; k < 3; k++) {
+      const key = ymKey(fyStart, FY_START_MONTH + (q - 1) * 3 + k);
+      if (capYm && key >= capYm) continue;
+      value += map.get(key) || 0;
+    }
+    out.push({ label: `Q${q}`, value });
+  }
+  return out;
+}
+
+// Whole financial years, oldest first: [{ label: '2026-2027', value: n }, ...]
+function webYearlySeries(map, fyCount, now = new Date()) {
+  const current = fyStartYear(now);
+  const capYm = ymKey(now.getFullYear(), now.getMonth() + 1);
+  const out = [];
+  for (let fy = current - (fyCount - 1); fy <= current; fy++) {
+    let value = 0;
+    for (let k = 0; k < 12; k++) {
+      const key = ymKey(fy, FY_START_MONTH + k);
+      if (key >= capYm) continue;
+      value += map.get(key) || 0;
+    }
+    out.push({ label: `${fy}-${fy + 1}`, value });
+  }
+  return out;
+}
+
+// Calendar-year rows shaped for buildFyMonthValueMap: [{ month: 1..12, value }]
+function webCalendarYearRows(map, year) {
+  const out = [];
+  for (let m = 0; m < 12; m++) {
+    out.push({ month: m + 1, value: map.get(ymKey(year, m)) || 0 });
+  }
+  return out;
+}
+
+// ─── TEMPORARY WEB-LEADS DIAGNOSTIC ────────────────────────────────────────
+// Set to false (or delete this block and its one call site) once web leads are
+// confirmed working. Prints, on every /performance request, exactly which of
+// the two possible causes is in play.
+const WEB_LEADS_DEBUG = true;
+const WEB_LEADS_BUILD = "2026-09-22-webleads-v4-js-parse";
+
+// Printed at require() time: if you do NOT see this line in the server log
+// after a restart, the running process is still on the OLD file.
+console.log(`[performanceModel] loaded build ${WEB_LEADS_BUILD}`);
+
+async function debugWebLeads(
+  leadConnection,
+  location,
+  areaConditions,
+  areaParams,
+  webLeadCounts,
+) {
+  const log = (...a) => console.log("[webleads]", ...a);
+  try {
+    log("=".repeat(62));
+    log("build ..................", WEB_LEADS_BUILD);
+    log("canonical location .....", JSON.stringify(location));
+    log("normalised area terms ..", JSON.stringify(areaParams));
+
+    const total = await runLeadQuery(
+      leadConnection,
+      "SELECT COUNT(*) AS n FROM appointments",
+      [],
+    );
+    log("rows in appointments ...", total[0].n);
+    log(
+      "rows matching AREA .....",
+      webLeadCounts.rowCount,
+      Number(webLeadCounts.rowCount) === 0
+        ? "  <<< AREA FILTER STILL WRONG"
+        : "",
+    );
+    log(
+      "of those, unparseable ..",
+      webLeadCounts.unparseable,
+      Number(webLeadCounts.unparseable) > 0
+        ? "  <-- unrecognised date format"
+        : "",
+    );
+
+    const months = [...webLeadCounts.entries()]
+      .filter(([k]) => /^\d{4}-\d{2}$/.test(k))
+      .sort()
+      .slice(-14);
+    log("last 14 months parsed ..", JSON.stringify(Object.fromEntries(months)));
+
+    if (Number(webLeadCounts.rowCount) === 0) {
+      const areas = await runLeadQuery(
+        leadConnection,
+        "SELECT selected_area, COUNT(*) AS n FROM appointments GROUP BY selected_area ORDER BY n DESC LIMIT 60",
+        [],
+      );
+      log("selected_area values (normalised -> raw):");
+      areas.forEach((a) =>
+        log(
+          "   ",
+          String(a.n).padStart(6),
+          normalizeArea(a.selected_area).padEnd(26),
+          JSON.stringify(a.selected_area),
+        ),
+      );
+    }
+    log("=".repeat(62));
+  } catch (e) {
+    log("DIAGNOSTIC FAILED:", e.message);
+  }
+}
+
 function prepareChartData(currentData, previousData) {
-  // Extract labels in sorted order (from currentData mainly)
-  const labels = currentData.map((row) => row.label);
+  const cur = Array.isArray(currentData) ? currentData : [];
+  const prev = Array.isArray(previousData) ? previousData : [];
+
+  // Labels come from currentData. If this year has no rows yet, fall back to
+  // last year's buckets - otherwise the chart renders completely blank instead
+  // of showing the last-year comparison bars.
+  const labels = (cur.length ? cur : prev).map((row) => row.label);
 
   // Create maps for quick lookup
-  const currentMap = new Map(currentData.map((row) => [row.label, row.value]));
-  const previousMap = new Map(
-    previousData.map((row) => [row.label, row.value])
-  );
+  const currentMap = new Map(cur.map((row) => [row.label, row.value]));
+  const previousMap = new Map(prev.map((row) => [row.label, row.value]));
 
   return {
     labels,
@@ -34,15 +271,15 @@ function sanitizeData(rawData) {
     (acc, [label, obj]) => {
       acc[label] = {
         currentYear: (obj.currentYear || []).filter(
-          (m) => m.label !== currentMonthLabel // hide current month
+          (m) => m.label !== currentMonthLabel, // hide current month
         ),
         previousYear: (obj.previousYear || []).filter(
-          (m) => m.label !== currentMonthLabel
+          (m) => m.label !== currentMonthLabel,
         ),
       };
       return acc;
     },
-    {}
+    {},
   );
 
   const safeQuarterly = Object.entries(rawData.Quarterly || {}).reduce(
@@ -60,7 +297,7 @@ function sanitizeData(rawData) {
       };
       return acc;
     },
-    {}
+    {},
   );
 
   return {
@@ -184,7 +421,7 @@ function buildChatbotWhere(location) {
 
   // (branch LIKE ? OR chat_whatsapp_branch LIKE ?) OR ...
   const pieces = terms.map(
-    () => "(branch LIKE ? OR chat_whatsapp_branch LIKE ?)"
+    () => "(branch LIKE ? OR chat_whatsapp_branch LIKE ?)",
   );
   let clause = "(" + pieces.join(" OR ") + ")";
 
@@ -197,6 +434,73 @@ function buildChatbotWhere(location) {
   const params = terms.flatMap((t) => [`%${t}%`, `%${t}%`]);
 
   return { clause, params };
+}
+
+// -- Branch -> selected_area matching ---------------------------------------
+// `appointments.selected_area` is free text typed by the website form, e.g.
+// "Pune - Dhole Patil Road", "Pimpri & Chinchwad", "Hyderabad " (trailing
+// space), "LUDHIANA". A plain LIKE on the branch name misses nearly all of it,
+// so both sides are normalised - uppercased with every non-alphanumeric
+// stripped - before matching. That alone makes "Pimpri-Chinchwad" match
+// "Pimpri & Chinchwad", and "Hyderabad" match "Hyderabad ".
+//
+// KEYS ARE THE CANONICAL NAMES RETURNED BY getConnectionByLocation(), not the
+// ?location= value the app sends. getConnectionByLocation("Chinchwad") returns
+// "Pimpri-Chinchwad", and it was that canonical name being looked up in a map
+// keyed by request names that produced zero matches.
+const AREA_ALIASES = {
+  "DP Road": ["DP Road", "Tilak Road", "Dhole Patil Road", "Swargate"],
+  "Salunkhe-Vihar": ["Salunkhe Vihar", "Salunke Vihar", "Wanowrie"],
+  Hinjewadi: ["Hinjewadi", "Hinjawadi"],
+  "Pimpri-Chinchwad": ["Pimpri Chinchwad", "Chinchwad", "Pimpri"],
+  "Navi-Mumbai": ["Navi Mumbai"],
+  "Kemps-Corner": ["Kemps Corner"],
+  Bangalore: ["Bangalore", "Bengaluru"],
+  "Gurgaon-14": ["Gurgaon Sector 14", "Gurugram Sector 14"],
+  "Gurgaon-49": ["Gurgaon Sector 49", "Gurugram Sector 49"],
+  Belagavi: ["Belagavi", "Belgavi"],
+  Sahakarnagar: ["Sahakarnagar", "Sahakar Nagar"],
+  HSR: ["HSR"],
+  Hyderabad: ["Hyderabad", "Jubilee Hills"],
+  Thane: ["Thane", "Kapurbawdi"],
+  Andheri: ["Andheri"],
+  Indiranagar: ["Indiranagar", "Indira Nagar"],
+  "Rajaji Nagar": ["Rajaji Nagar", "Rajajinagar"],
+  Sarjapura: ["Sarjapura", "Sarjapur"],
+  Kalaburagi: ["Kalaburagi", "Gulbarga"],
+  Mysore: ["Mysore", "Mysuru"],
+  Nashik: ["Nashik", "Nasik"],
+  "Electronic City": ["Electronic City", "Electronics City"],
+  "RR Nagar": ["RR Nagar", "Rajarajeshwari Nagar"],
+};
+
+// Uppercase, drop everything that is not a letter or digit.
+const normalizeArea = (s) =>
+  String(s == null ? "" : s)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+
+// The same normalisation expressed in SQL, so the comparison happens in the DB.
+const SQL_NORMALIZED_AREA =
+  "UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(" +
+  "selected_area, ' ', ''), '-', ''), '&', ''), '.', ''), ',', ''), '_', ''), '/', ''))";
+
+// Builds the selected_area filter. `location` is the CANONICAL name.
+function buildAreaWhere(location) {
+  const terms = AREA_ALIASES[location] || [location];
+  const params = [...new Set(terms.map(normalizeArea))].filter(Boolean);
+
+  const conditions = params.map(
+    () => SQL_NORMALIZED_AREA + " LIKE CONCAT('%', ?, '%')",
+  );
+
+  // JP Nagar leads are often filed under the city alone.
+  if (location === "JP Nagar") {
+    conditions.push(SQL_NORMALIZED_AREA + " = ?");
+    params.push("BENGALURU");
+  }
+
+  return { clause: conditions.join(" OR "), params };
 }
 
 // Helper to promisify connection.query
@@ -236,65 +540,31 @@ const getPerformance = async (req) => {
 
   try {
     const { clause: whereClause, params } = buildChatbotWhere(location);
-    let areaConditions = "selected_area LIKE CONCAT('%', ?, '%')";
-    let areaParams = [location];
+    const { clause: areaConditions, params: areaParams } =
+      buildAreaWhere(location);
 
-    if (location === "DP Road") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Tilak Road', '%')
-            OR selected_area LIKE CONCAT('%', 'Dhole Patil Road', '%')
-          `;
-    } else if (location === "Salunke Vihar") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Wanowrie', '%')
-          `;
-    } else if (location === "Hinjewadi") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Hinjawadi', '%')
-          `;
-    } else if (location === "JP Nagar") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area = 'Bengaluru'
-          `;
-    } else if (location === "Sarjapura") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Sarjapur', '%')
-          `;
-    } else if (location === "Rajaji Nagar") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Rajajinagar', '%')
-          `;
-    } else if (location === "Belgavi") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Belagavi', '%')
-          `;
-    } else if (location === "Sahakar Nagar") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Sahakarnagar', '%')
-          `;
-    } else if (location === "Gurgaon Sector 14") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Gurugram - Sector 14', '%')
-          `;
-    } else if (location === "Gurgaon Sector 49") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Gurugram - Sector 49', '%')
-          `;
-    } else if (location === "Thane") {
-      areaConditions = `
-            selected_area LIKE CONCAT('%', ?) 
-            OR selected_area LIKE CONCAT('%', 'Kapurbawdi', '%')
-          `;
+    // Single source of truth for every web-lead series below. Window is wide
+    // enough for: 6-month comparisons, the last two FYs of quarters, and the
+    // FY bar chart.
+    const webLeadNow = new Date();
+    const webLeadCapYm = ymKey(
+      webLeadNow.getFullYear(),
+      webLeadNow.getMonth() + 1,
+    );
+    const webLeadCounts = await fetchWebLeadMonthlyCounts(
+      leadConnection,
+      areaConditions,
+      areaParams,
+    );
+
+    if (WEB_LEADS_DEBUG) {
+      await debugWebLeads(
+        leadConnection,
+        location,
+        areaConditions,
+        areaParams,
+        webLeadCounts,
+      );
     }
 
     // ---------- Monthly (last 6 months) ----------
@@ -308,7 +578,7 @@ WHERE STR_TO_DATE(call_date, '%Y-%d-%m') >= DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()
 AND destination_name != ""
 GROUP BY YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')), MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))
 ORDER BY YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')), MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'));
-  `
+  `,
     );
     const ivrMonthlyPrevious = await runQuery(
       connection,
@@ -321,7 +591,7 @@ ORDER BY YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')), MONTH(STR_TO_DATE(call_date, 
     AND destination_name != ""
   GROUP BY YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')), MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))
   ORDER BY YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')), MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'));
-  `
+  `,
     );
 
     const newMonthlyCurrent = await runQuery(
@@ -337,7 +607,7 @@ WHERE ap.patient_type = 'New'
   AND ap.appointment_timestamp >= DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 6 MONTH)
 GROUP BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp)
 ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
-  `
+  `,
     );
 
     const newMonthlyPrevious = await runQuery(
@@ -354,7 +624,7 @@ WHERE ap.patient_type = 'New'
   AND ap.appointment_timestamp <  DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 12 MONTH)
 GROUP BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp)
 ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
-  `
+  `,
     );
     const followupMonthlyCurrent = await runQuery(
       connection,
@@ -369,7 +639,7 @@ WHERE ap.patient_type = 'Follow'
   AND ap.appointment_timestamp >= DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 6 MONTH)
 GROUP BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp)
 ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
-  `
+  `,
     );
 
     const followupMonthlyPrevious = await runQuery(
@@ -386,7 +656,7 @@ WHERE ap.patient_type = 'Follow'
   AND ap.appointment_timestamp <  DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 12 MONTH)
 GROUP BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp)
 ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
-  `
+  `,
     );
 
     const ipdPatientMonthlyCurrent = await runQuery(
@@ -399,7 +669,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
   WHERE inv.creation_date >= DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 6 MONTH)
   GROUP BY YEAR(inv.creation_date), MONTH(inv.creation_date)
   ORDER BY YEAR(inv.creation_date), MONTH(inv.creation_date);
-  `
+  `,
     );
 
     const ipdPatientMonthlyPrevious = await runQuery(
@@ -413,7 +683,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
     AND inv.creation_date <  DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 12 MONTH)
   GROUP BY YEAR(inv.creation_date), MONTH(inv.creation_date)
   ORDER BY YEAR(inv.creation_date), MONTH(inv.creation_date);
-  `
+  `,
     );
 
     const opdMonthlyCurrent = await runQuery(
@@ -427,7 +697,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
   AND is_deleted != 1
   GROUP BY YEAR(receipt_date), MONTH(receipt_date)
   ORDER BY YEAR(receipt_date), MONTH(receipt_date);
-  `
+  `,
     );
     const opdMonthlyPrevious = await runQuery(
       connection,
@@ -441,7 +711,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
     AND is_deleted != 1
   GROUP BY YEAR(receipt_date), MONTH(receipt_date)
   ORDER BY YEAR(receipt_date), MONTH(receipt_date);
-  `
+  `,
     );
 
     let labMonthlyCurrent, labMonthlyPrevious;
@@ -460,7 +730,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
       AND is_deleted != 1
     GROUP BY YEAR(receipt_date), MONTH(receipt_date)
     ORDER BY YEAR(receipt_date), MONTH(receipt_date);
-    `
+    `,
       );
 
       // Previous year LAB monthly totals
@@ -477,7 +747,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
       AND is_deleted != 1
     GROUP BY YEAR(receipt_date), MONTH(receipt_date)
     ORDER BY YEAR(receipt_date), MONTH(receipt_date);
-    `
+    `,
       );
     } else {
       // Current year LAB monthly totals (non–DP Road)
@@ -493,7 +763,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
       AND is_deleted != 1
     GROUP BY YEAR(item_date), MONTH(item_date)
     ORDER BY YEAR(item_date), MONTH(item_date);
-    `
+    `,
       );
 
       // Previous year LAB monthly totals (non–DP Road)
@@ -510,7 +780,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
       AND is_deleted != 1
     GROUP BY YEAR(item_date), MONTH(item_date)
     ORDER BY YEAR(item_date), MONTH(item_date);
-    `
+    `,
       );
     }
 
@@ -524,7 +794,7 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
   WHERE creation_date >= DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 6 MONTH)
   GROUP BY YEAR(creation_date), MONTH(creation_date)
   ORDER BY YEAR(creation_date), MONTH(creation_date);
-  `
+  `,
     );
 
     const ipdMonthlyPrevious = await runQuery(
@@ -538,40 +808,22 @@ ORDER BY YEAR(ap.appointment_timestamp), MONTH(ap.appointment_timestamp);
     AND creation_date < DATE_SUB(DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY), INTERVAL 12 MONTH)
   GROUP BY YEAR(creation_date), MONTH(creation_date)
   ORDER BY YEAR(creation_date), MONTH(creation_date);
-  `
+  `,
     );
 
     // ✅ Monthly (last 6 months, month start → month end)
-    const leadsMonthlyCurrent = await runLeadQuery(
-      leadConnection,
-      `
-  SELECT 
-  DATE_FORMAT(date, '%b') AS label,     -- Jan, Feb, Mar...
-  COUNT(*) AS value
-FROM appointments
-WHERE (${areaConditions})
-  AND date >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 5 MONTH)
-  AND date <  DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 1 MONTH)
-GROUP BY YEAR(date), MONTH(date)
-ORDER BY YEAR(date), MONTH(date);
-  `,
-      [...areaParams]
+    // 6 months ending with the current month, and the same 6 a year earlier.
+    const leadsMonthlyCurrent = webMonthlySeries(
+      webLeadCounts,
+      6,
+      0,
+      webLeadNow,
     );
-
-    const leadsMonthlyPrevious = await runLeadQuery(
-      leadConnection,
-      `
-  SELECT 
-    DATE_FORMAT(date, '%b') AS label,
-    COUNT(*) AS value
-  FROM appointments
-  WHERE (${areaConditions})
-    AND date >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 17 MONTH) -- 12 + 5
-    AND date <  DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 11 MONTH)
-  GROUP BY YEAR(date), MONTH(date)
-  ORDER BY YEAR(date), MONTH(date);
-  `,
-      [...areaParams]
+    const leadsMonthlyPrevious = webMonthlySeries(
+      webLeadCounts,
+      6,
+      1,
+      webLeadNow,
     );
 
     const chatbotLeadsMonthlyCurrent = await runLeadQuery(
@@ -587,7 +839,7 @@ ORDER BY YEAR(date), MONTH(date);
       GROUP BY YEAR(datetime), MONTH(datetime)
       ORDER BY YEAR(datetime), MONTH(datetime);
     `,
-      params
+      params,
     );
 
     const chatbotLeadsMonthlyPrevious = await runLeadQuery(
@@ -603,7 +855,7 @@ ORDER BY YEAR(date), MONTH(date);
   GROUP BY YEAR(datetime), MONTH(datetime)
   ORDER BY YEAR(datetime), MONTH(datetime);
   `,
-      params
+      params,
     );
 
     // ---------- Quarterly (last 4 quarters) ----------
@@ -673,7 +925,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     const ivrQuarterlyPrevious = await runQuery(
@@ -719,7 +971,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     const newQuarterlyCurrent = await runQuery(
@@ -787,7 +1039,7 @@ ORDER BY qtrs.qtr;
       ON m.qtr = qtrs.qtr
     GROUP BY qtrs.qtr, qtrs.current_qtr
     ORDER BY qtrs.qtr;
-  `
+  `,
     );
 
     const newQuarterlyPrevious = await runQuery(
@@ -831,7 +1083,7 @@ RIGHT JOIN (
   ON m.qtr = qtrs.qtr
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
-  `
+  `,
     );
 
     const followupQuarterlyCurrent = await runQuery(
@@ -899,7 +1151,7 @@ RIGHT JOIN (
   ON m.qtr = qtrs.qtr
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
-  `
+  `,
     );
     const followupQuarterlyPrevious = await runQuery(
       connection,
@@ -943,7 +1195,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     const ipdPatientQuarterlyCurrent = await runQuery(
@@ -1008,7 +1260,7 @@ RIGHT JOIN (
   ON m.qtr = qtrs.qtr
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
-  `
+  `,
     );
 
     const ipdPatientQuarterlyPrevious = await runQuery(
@@ -1050,7 +1302,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     //     const postopQuarterly = await runQuery(
@@ -1157,7 +1409,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     const opdQuarterlyPrevious = await runQuery(
@@ -1200,7 +1452,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     let labQuarterlyCurrent, labQuarterlyPrevious;
@@ -1272,7 +1524,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
 
-    `
+    `,
       );
 
       // Previous FY LAB quarterly totals
@@ -1317,7 +1569,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-    `
+    `,
       );
     } else {
       // Current FY LAB quarterly totals (non–DP Road)
@@ -1386,7 +1638,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
 
-    `
+    `,
       );
 
       // Previous FY LAB quarterly totals (non–DP Road)
@@ -1431,7 +1683,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-    `
+    `,
       );
     }
 
@@ -1498,7 +1750,7 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr, qtrs.current_qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     const ipdQuarterlyPrevious = await runQuery(
@@ -1540,109 +1792,21 @@ RIGHT JOIN (
 GROUP BY qtrs.qtr
 ORDER BY qtrs.qtr;
 
-  `
+  `,
     );
 
     // ✅ Quarterly (last 4 quarters, FY style: Apr–Jun=Q1, Jul–Sep=Q2, Oct–Dec=Q3, Jan–Mar=Q4)
-    const leadsQuarterlyCurrent = await runLeadQuery(
-      leadConnection,
-      `
-  SELECT
-  CONCAT('Q', q.qtr) AS label,
-  CASE
-    /* show 0 for future quarters of the current FY */
-    WHEN q.qtr <= (
-      CASE
-        WHEN MONTH(CURDATE()) BETWEEN 4 AND 6 THEN 1
-        WHEN MONTH(CURDATE()) BETWEEN 7 AND 9 THEN 2
-        WHEN MONTH(CURDATE()) BETWEEN 10 AND 12 THEN 3
-        ELSE 4
-      END
-    ) THEN COALESCE(m.mcount, 0)
-    ELSE 0
-  END AS value
-FROM (
-  SELECT 1 AS qtr UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
-) q
-LEFT JOIN (
-  SELECT
-    CASE
-      WHEN MONTH(date) BETWEEN 4 AND 6  THEN 1
-      WHEN MONTH(date) BETWEEN 7 AND 9  THEN 2
-      WHEN MONTH(date) BETWEEN 10 AND 12 THEN 3
-      ELSE 4
-    END AS qtr,
-    COUNT(*) AS mcount
-  FROM appointments
-  WHERE (${areaConditions})
-    /* current FY start (Apr 1 of the correct year even in Jan–Mar) */
-    AND date >= (
-      CASE
-        WHEN MONTH(CURDATE()) BETWEEN 1 AND 3
-          THEN MAKEDATE(YEAR(CURDATE()) - 1, 1) + INTERVAL 3 MONTH   -- (YEAR-1)-04-01
-        ELSE MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL 3 MONTH          -- YEAR-04-01
-      END
-    )
-    /* up to the current month only, but never beyond FY end */
-    AND date < LEAST(
-      DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH),           -- next month start
-      CASE
-        WHEN MONTH(CURDATE()) BETWEEN 1 AND 3
-          THEN MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL 3 MONTH                  -- YEAR-04-01
-        ELSE MAKEDATE(YEAR(CURDATE()) + 1, 1) + INTERVAL 3 MONTH                -- (YEAR+1)-04-01
-      END
-    )
-  GROUP BY qtr
-) m
-  ON m.qtr = q.qtr
-ORDER BY q.qtr;
-  `,
-      [...areaParams]
+    // FY quarters; the running FY is capped at the current month so future
+    // quarters read 0 rather than being omitted.
+    const leadsQuarterlyCurrent = webQuarterlySeries(
+      webLeadCounts,
+      fyStartYear(webLeadNow),
+      webLeadCapYm,
     );
-
-    const leadsQuarterlyPrevious = await runLeadQuery(
-      leadConnection,
-      `
-  SELECT
-  CONCAT('Q', q.qtr) AS label,
-  COALESCE(m.mcount, 0) AS value
-FROM (
-  SELECT 1 AS qtr UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
-) q
-LEFT JOIN (
-  SELECT
-    CASE
-      WHEN MONTH(date) BETWEEN 4 AND 6  THEN 1
-      WHEN MONTH(date) BETWEEN 7 AND 9  THEN 2
-      WHEN MONTH(date) BETWEEN 10 AND 12 THEN 3
-      ELSE 4
-    END AS qtr,
-    COUNT(*) AS mcount
-  FROM appointments
-  WHERE (${areaConditions})
-    /* previous FY start */
-    AND date >= (
-      CASE
-        WHEN MONTH(CURDATE()) BETWEEN 1 AND 3
-          THEN MAKEDATE(YEAR(CURDATE()) - 2, 1) + INTERVAL 3 MONTH   -- (YEAR-2)-04-01
-        ELSE MAKEDATE(YEAR(CURDATE()) - 1, 1) + INTERVAL 3 MONTH      -- (YEAR-1)-04-01
-      END
-    )
-    /* previous FY end (start of current FY) */
-    AND date < (
-      CASE
-        WHEN MONTH(CURDATE()) BETWEEN 1 AND 3
-          THEN MAKEDATE(YEAR(CURDATE()) - 1, 1) + INTERVAL 3 MONTH   -- (YEAR-1)-04-01
-        ELSE MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL 3 MONTH          -- YEAR-04-01
-      END
-    )
-  GROUP BY qtr
-) m
-  ON m.qtr = q.qtr
-ORDER BY q.qtr;
-
-  `,
-      [...areaParams]
+    const leadsQuarterlyPrevious = webQuarterlySeries(
+      webLeadCounts,
+      fyStartYear(webLeadNow) - 1,
+      null,
     );
 
     const chatbotLeadsQuarterlyCurrent = await runLeadQuery(
@@ -1708,7 +1872,7 @@ LEFT JOIN (
 ORDER BY qtrs.qtr;
 
   `,
-      params
+      params,
     );
 
     const chatbotLeadsQuarterlyPrevious = await runLeadQuery(
@@ -1753,7 +1917,7 @@ LEFT JOIN (
 ORDER BY q.qtr;
 
   `,
-      params
+      params,
     );
 
     // ---------- Yearly (last 4 years) ----------
@@ -1772,7 +1936,7 @@ WHERE STR_TO_DATE(call_date, '%Y-%d-%m') BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 
   AND destination_name != ''
 GROUP BY label
 ORDER BY MIN(STR_TO_DATE(call_date, '%Y-%d-%m'));
-  `
+  `,
     );
 
     const newYearly = await runQuery(
@@ -1793,7 +1957,7 @@ WHERE ap.patient_type = 'New'   -- change to 'Follow' or 'Postoperative'
 GROUP BY label
 ORDER BY MIN(ap.appointment_timestamp);
 
-  `
+  `,
     );
 
     const followupYearly = await runQuery(
@@ -1815,7 +1979,7 @@ GROUP BY label
 ORDER BY MIN(ap.appointment_timestamp);
 
 
-  `
+  `,
     );
 
     const ipdPatientYearly = await runQuery(
@@ -1833,7 +1997,7 @@ WHERE inv.creation_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 YEAR) AND CURDATE
 GROUP BY label
 ORDER BY MIN(inv.creation_date);
 
-  `
+  `,
     );
 
     const opdYearly = await runQuery(
@@ -1852,7 +2016,7 @@ WHERE receipt_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 YEAR) AND CURDATE()
 GROUP BY label
 ORDER BY MIN(receipt_date);
 
-  `
+  `,
     );
 
     let labYearly;
@@ -1876,7 +2040,7 @@ WHERE chargeCondition = 'LabTest'
 GROUP BY label
 ORDER BY MIN(receipt_date);
 
-    `
+    `,
       );
     } else {
       // Yearly LAB totals (non–DP Road)
@@ -1897,7 +2061,7 @@ WHERE consultation = 'LAB'
 GROUP BY label
 ORDER BY MIN(item_date);
 
-    `
+    `,
       );
     }
 
@@ -1916,28 +2080,12 @@ WHERE creation_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 YEAR) AND CURDATE()
 GROUP BY label
 ORDER BY MIN(creation_date);
 
-  `
+  `,
     );
 
     // ✅ Yearly (last 4 calendar years, Jan–Dec)
-    const leadsYearly = await runLeadQuery(
-      leadConnection,
-      `
-  SELECT 
-    CASE 
-      WHEN MONTH(date) >= 4 
-        THEN CONCAT(YEAR(date), '-', YEAR(date) + 1)
-      ELSE CONCAT(YEAR(date) - 1, '-', YEAR(date))
-    END AS label,
-    COUNT(*) AS value
-  FROM appointments
-  WHERE (${areaConditions})
-    AND date BETWEEN DATE_SUB(CURDATE(), INTERVAL 3 YEAR) AND CURDATE()
-  GROUP BY label
-  ORDER BY MIN(date);
-  `,
-      [...areaParams]
-    );
+    // Last 4 financial years, oldest first.
+    const leadsYearly = webYearlySeries(webLeadCounts, 4, webLeadNow);
 
     const chatbotLeadsYearly = await runLeadQuery(
       leadConnection,
@@ -1955,7 +2103,7 @@ ORDER BY MIN(creation_date);
   GROUP BY label
   ORDER BY MIN(datetime)
   `,
-      params
+      params,
     );
 
     // ✅ Build final response with plain arrays (no Query objects)
@@ -2010,102 +2158,102 @@ ORDER BY MIN(creation_date);
         ivr: ivrYearly,
         web: leadsYearly,
         bot: chatbotLeadsYearly,
-      }
+      },
     );
     let response = { ...rawData };
 
     // IVR Chart Data
     const ivrChartDataMonthly = prepareChartData(
       ivrMonthlyCurrent,
-      ivrMonthlyPrevious
+      ivrMonthlyPrevious,
     );
 
     // Web Leads Chart Data
     const webChartDataMonthly = prepareChartData(
       leadsMonthlyCurrent,
-      leadsMonthlyPrevious
+      leadsMonthlyPrevious,
     );
 
     // Bot Leads Chart Data
     const botChartDataMonthly = prepareChartData(
       chatbotLeadsMonthlyCurrent,
-      chatbotLeadsMonthlyPrevious
+      chatbotLeadsMonthlyPrevious,
     );
     // IVR Chart Data
     const ivrChartDataQuarterly = prepareChartData(
       ivrQuarterlyCurrent,
-      ivrQuarterlyPrevious
+      ivrQuarterlyPrevious,
     );
 
     // Web Leads Chart Data
     const webChartDataQuarterly = prepareChartData(
       leadsQuarterlyCurrent,
-      leadsQuarterlyPrevious
+      leadsQuarterlyPrevious,
     );
 
     // Bot Leads Chart Data
     const botChartDataQuarterly = prepareChartData(
       chatbotLeadsQuarterlyCurrent,
-      chatbotLeadsQuarterlyPrevious
+      chatbotLeadsQuarterlyPrevious,
     );
 
     // Patients Chart Data
     const newPatientChartDataMonthly = prepareChartData(
       newMonthlyCurrent,
-      newMonthlyPrevious
+      newMonthlyPrevious,
     );
     const followUpPatientChartDataMonthly = prepareChartData(
       followupMonthlyCurrent,
-      followupMonthlyPrevious
+      followupMonthlyPrevious,
     );
 
     const newPatientChartDataQuarterly = prepareChartData(
       newQuarterlyCurrent,
-      newQuarterlyPrevious
+      newQuarterlyPrevious,
     );
     const followUpPatientChartDataQuarterly = prepareChartData(
       followupQuarterlyCurrent,
-      followupQuarterlyPrevious
+      followupQuarterlyPrevious,
     );
 
     const ipdPatientChartDataMonthly = prepareChartData(
       ipdPatientMonthlyCurrent,
-      ipdPatientMonthlyPrevious
+      ipdPatientMonthlyPrevious,
     );
     const ipdPatientChartDataQuarterly = prepareChartData(
       ipdPatientQuarterlyCurrent,
-      ipdPatientQuarterlyPrevious
+      ipdPatientQuarterlyPrevious,
     );
 
     //OPD Data
 
     const opdInvoiceChartDataMonthly = prepareChartData(
       opdMonthlyCurrent,
-      opdMonthlyPrevious
+      opdMonthlyPrevious,
     );
     const opdInvoiceChartDataQuarterly = prepareChartData(
       opdQuarterlyCurrent,
-      opdQuarterlyPrevious
+      opdQuarterlyPrevious,
     );
 
     const labChartDataMonthly = prepareChartData(
       labMonthlyCurrent,
-      labMonthlyPrevious
+      labMonthlyPrevious,
     );
     const labChartDataQuarterly = prepareChartData(
       labQuarterlyCurrent,
-      labQuarterlyPrevious
+      labQuarterlyPrevious,
     );
 
     //IPD Data
 
     const ipdInvoiceChartDataMonthly = prepareChartData(
       ipdMonthlyCurrent,
-      ipdMonthlyPrevious
+      ipdMonthlyPrevious,
     );
     const ipdInvoiceChartDataQuarterly = prepareChartData(
       ipdQuarterlyCurrent,
-      ipdQuarterlyPrevious
+      ipdQuarterlyPrevious,
     );
 
     const AIFilteredData = sanitizeData(rawData);
@@ -2214,41 +2362,18 @@ const getMonthlyPerformance = async (req) => {
     const { clause: whereClause, params: chatbotParams } =
       buildChatbotWhere(location);
 
-    let areaConditions = "selected_area LIKE CONCAT('%', ?, '%')";
-    let areaParams = [location];
-    if (location === "DP Road")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Tilak Road%' OR selected_area LIKE '%Dhole Patil Road%'";
-    else if (location === "Salunke Vihar")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Wanowrie%'";
-    else if (location === "Hinjewadi")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Hinjawadi%'";
-    else if (location === "JP Nagar")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area = 'Bengaluru'";
-    else if (location === "Sarjapura")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Sarjapur%'";
-    else if (location === "Rajaji Nagar")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Rajajinagar%'";
-    else if (location === "Belgavi")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Belagavi%'";
-    else if (location === "Sahakar Nagar")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Sahakarnagar%'";
-    else if (location === "Gurgaon Sector 14")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Gurugram - Sector 14%'";
-    else if (location === "Gurgaon Sector 49")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Gurugram - Sector 49%'";
-    else if (location === "Thane")
-      areaConditions =
-        "selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Kapurbawdi%'";
+    const { clause: areaConditions, params: areaParams } =
+      buildAreaWhere(location);
+
+    // Same string-only web-lead read as getPerformance (see the helpers at the
+    // top of this file for why no SQL date function touches `appointments`).
+    const webLeadNow = new Date();
+    const webLeadCounts = await fetchWebLeadMonthlyCounts(
+      leadConnection,
+      areaConditions,
+      areaParams,
+    );
+    ("selected_area LIKE CONCAT('%', ?) OR selected_area LIKE '%Kapurbawdi%'");
 
     const now = new Date();
     const lastCompletedMonth = now.getMonth() - 1; // 0-indexed
@@ -2300,7 +2425,7 @@ const getMonthlyPerformance = async (req) => {
        WHERE YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')) = YEAR(CURDATE())
          AND destination_name != ''
        GROUP BY MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))
-       ORDER BY MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))`
+       ORDER BY MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))`,
     );
     const ivrLastRows = await runQuery(
       connection,
@@ -2309,7 +2434,7 @@ const getMonthlyPerformance = async (req) => {
        WHERE YEAR(STR_TO_DATE(call_date, '%Y-%d-%m')) = YEAR(CURDATE()) - 1
          AND destination_name != ''
        GROUP BY MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))
-       ORDER BY MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))`
+       ORDER BY MONTH(STR_TO_DATE(call_date, '%Y-%d-%m'))`,
     );
 
     const newThisRows = await runQuery(
@@ -2318,7 +2443,7 @@ const getMonthlyPerformance = async (req) => {
        FROM appointment
        WHERE patient_type='New' AND is_deleted!=1 AND confirm_time!='0' AND YEAR(appointment_timestamp)=YEAR(CURDATE())
        GROUP BY MONTH(appointment_timestamp)
-       ORDER BY MONTH(appointment_timestamp)`
+       ORDER BY MONTH(appointment_timestamp)`,
     );
     const newLastRows = await runQuery(
       connection,
@@ -2326,7 +2451,7 @@ const getMonthlyPerformance = async (req) => {
        FROM appointment
        WHERE patient_type='New' AND is_deleted!=1 AND confirm_time!='0' AND YEAR(appointment_timestamp)=YEAR(CURDATE())-1
        GROUP BY MONTH(appointment_timestamp)
-       ORDER BY MONTH(appointment_timestamp)`
+       ORDER BY MONTH(appointment_timestamp)`,
     );
 
     const followThisRows = await runQuery(
@@ -2335,7 +2460,7 @@ const getMonthlyPerformance = async (req) => {
        FROM appointment
        WHERE patient_type='Follow' AND is_deleted!=1 AND confirm_time!='0' AND YEAR(appointment_timestamp)=YEAR(CURDATE())
        GROUP BY MONTH(appointment_timestamp)
-       ORDER BY MONTH(appointment_timestamp)`
+       ORDER BY MONTH(appointment_timestamp)`,
     );
     const followLastRows = await runQuery(
       connection,
@@ -2343,7 +2468,7 @@ const getMonthlyPerformance = async (req) => {
        FROM appointment
        WHERE patient_type='Follow' AND is_deleted!=1 AND confirm_time!='0' AND YEAR(appointment_timestamp)=YEAR(CURDATE())-1
        GROUP BY MONTH(appointment_timestamp)
-       ORDER BY MONTH(appointment_timestamp)`
+       ORDER BY MONTH(appointment_timestamp)`,
     );
 
     const ipdPatientsThisRows = await runQuery(
@@ -2352,7 +2477,7 @@ const getMonthlyPerformance = async (req) => {
        FROM invoice
        WHERE YEAR(creation_date)=YEAR(CURDATE())
        GROUP BY MONTH(creation_date)
-       ORDER BY MONTH(creation_date)`
+       ORDER BY MONTH(creation_date)`,
     );
     const ipdPatientsLastRows = await runQuery(
       connection,
@@ -2360,7 +2485,7 @@ const getMonthlyPerformance = async (req) => {
        FROM invoice
        WHERE YEAR(creation_date)=YEAR(CURDATE())-1
        GROUP BY MONTH(creation_date)
-       ORDER BY MONTH(creation_date)`
+       ORDER BY MONTH(creation_date)`,
     );
 
     const opdThisRows = await runQuery(
@@ -2369,7 +2494,7 @@ const getMonthlyPerformance = async (req) => {
        FROM patient_receipt
        WHERE is_deleted!=1 AND YEAR(receipt_date)=YEAR(CURDATE())
        GROUP BY MONTH(receipt_date)
-       ORDER BY MONTH(receipt_date)`
+       ORDER BY MONTH(receipt_date)`,
     );
     const opdLastRows = await runQuery(
       connection,
@@ -2377,7 +2502,7 @@ const getMonthlyPerformance = async (req) => {
        FROM patient_receipt
        WHERE is_deleted!=1 AND YEAR(receipt_date)=YEAR(CURDATE())-1
        GROUP BY MONTH(receipt_date)
-       ORDER BY MONTH(receipt_date)`
+       ORDER BY MONTH(receipt_date)`,
     );
 
     let labThisRows, labLastRows;
@@ -2388,7 +2513,7 @@ const getMonthlyPerformance = async (req) => {
          FROM patient_receipt
          WHERE chargeCondition='LabTest' AND is_deleted!=1 AND YEAR(receipt_date)=YEAR(CURDATE())
          GROUP BY MONTH(receipt_date)
-         ORDER BY MONTH(receipt_date)`
+         ORDER BY MONTH(receipt_date)`,
       );
       labLastRows = await runQuery(
         connection,
@@ -2396,7 +2521,7 @@ const getMonthlyPerformance = async (req) => {
          FROM patient_receipt
          WHERE chargeCondition='LabTest' AND is_deleted!=1 AND YEAR(receipt_date)=YEAR(CURDATE())-1
          GROUP BY MONTH(receipt_date)
-         ORDER BY MONTH(receipt_date)`
+         ORDER BY MONTH(receipt_date)`,
       );
     } else {
       labThisRows = await runQuery(
@@ -2405,7 +2530,7 @@ const getMonthlyPerformance = async (req) => {
          FROM patient_itemreceipt
          WHERE consultation='LAB' AND is_deleted!=1 AND YEAR(item_date)=YEAR(CURDATE())
          GROUP BY MONTH(item_date)
-         ORDER BY MONTH(item_date)`
+         ORDER BY MONTH(item_date)`,
       );
       labLastRows = await runQuery(
         connection,
@@ -2413,7 +2538,7 @@ const getMonthlyPerformance = async (req) => {
          FROM patient_itemreceipt
          WHERE consultation='LAB' AND is_deleted!=1 AND YEAR(item_date)=YEAR(CURDATE())-1
          GROUP BY MONTH(item_date)
-         ORDER BY MONTH(item_date)`
+         ORDER BY MONTH(item_date)`,
       );
     }
 
@@ -2423,7 +2548,7 @@ const getMonthlyPerformance = async (req) => {
        FROM invoice
        WHERE YEAR(creation_date)=YEAR(CURDATE())
        GROUP BY MONTH(creation_date)
-       ORDER BY MONTH(creation_date)`
+       ORDER BY MONTH(creation_date)`,
     );
     const ipdRevenueLastRows = await runQuery(
       connection,
@@ -2431,26 +2556,16 @@ const getMonthlyPerformance = async (req) => {
        FROM invoice
        WHERE YEAR(creation_date)=YEAR(CURDATE())-1
        GROUP BY MONTH(creation_date)
-       ORDER BY MONTH(creation_date)`
+       ORDER BY MONTH(creation_date)`,
     );
 
-    const leadsThisRows = await runLeadQuery(
-      leadConnection,
-      `SELECT MONTH(date) AS month, COUNT(*) AS value
-       FROM appointments
-       WHERE (${areaConditions}) AND YEAR(date)=YEAR(CURDATE())
-       GROUP BY MONTH(date)
-       ORDER BY MONTH(date)`,
-      [...areaParams]
+    const leadsThisRows = webCalendarYearRows(
+      webLeadCounts,
+      webLeadNow.getFullYear(),
     );
-    const leadsLastRows = await runLeadQuery(
-      leadConnection,
-      `SELECT MONTH(date) AS month, COUNT(*) AS value
-       FROM appointments
-       WHERE (${areaConditions}) AND YEAR(date)=YEAR(CURDATE())-1
-       GROUP BY MONTH(date)
-       ORDER BY MONTH(date)`,
-      [...areaParams]
+    const leadsLastRows = webCalendarYearRows(
+      webLeadCounts,
+      webLeadNow.getFullYear() - 1,
     );
 
     const chatbotThisRows = await runLeadQuery(
@@ -2460,7 +2575,7 @@ const getMonthlyPerformance = async (req) => {
        WHERE ${whereClause} AND YEAR(datetime)=YEAR(CURDATE())
        GROUP BY MONTH(datetime)
        ORDER BY MONTH(datetime)`,
-      [...(chatbotParams || [])]
+      [...(chatbotParams || [])],
     );
     const chatbotLastRows = await runLeadQuery(
       leadConnection,
@@ -2469,7 +2584,7 @@ const getMonthlyPerformance = async (req) => {
        WHERE ${whereClause} AND YEAR(datetime)=YEAR(CURDATE())-1
        GROUP BY MONTH(datetime)
        ORDER BY MONTH(datetime)`,
-      [...(chatbotParams || [])]
+      [...(chatbotParams || [])],
     );
 
     // --- Build response FY-wise ---
@@ -2477,7 +2592,7 @@ const getMonthlyPerformance = async (req) => {
       "IVR Calls Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           ivrThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(ivrLastRows),
@@ -2485,7 +2600,7 @@ const getMonthlyPerformance = async (req) => {
       "New Appointments Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           newThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(newLastRows),
@@ -2493,7 +2608,7 @@ const getMonthlyPerformance = async (req) => {
       "Follow-up appointments Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           followThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(followLastRows),
@@ -2501,7 +2616,7 @@ const getMonthlyPerformance = async (req) => {
       "IPD Patients Count Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           ipdPatientsThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(ipdPatientsLastRows),
@@ -2509,7 +2624,7 @@ const getMonthlyPerformance = async (req) => {
       "Overall OPD Revenue Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           opdThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(opdLastRows),
@@ -2517,7 +2632,7 @@ const getMonthlyPerformance = async (req) => {
       "Lab Revenue Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           labThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(labLastRows),
@@ -2525,7 +2640,7 @@ const getMonthlyPerformance = async (req) => {
       "IPD Revenue Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           ipdRevenueThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(ipdRevenueLastRows),
@@ -2533,7 +2648,7 @@ const getMonthlyPerformance = async (req) => {
       "Web Leads Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           leadsThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(leadsLastRows),
@@ -2541,7 +2656,7 @@ const getMonthlyPerformance = async (req) => {
       "Chat Bot leads Data": {
         [`FY ${currentYear}-${currentYear + 1}`]: buildFyMonthValueMap(
           chatbotThisRows,
-          currentFyMonthsCount
+          currentFyMonthsCount,
         ),
         [`FY ${previousYear}-${previousYear + 1}`]:
           buildFyMonthValueMap(chatbotLastRows),

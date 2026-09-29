@@ -1,6 +1,7 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 const { resolveInsuranceNames } = require("./reportModel");
 const { addCompanyNames } = require("./utils/insuranceNames");
+const { interbranchRoleSql, countedSql } = require("./utils/interbranch");
 
 const getIPDCollection = async (req) => {
   console.log(req.params.location);
@@ -876,6 +877,170 @@ const getIPDBillsV4 = async (req) => {
   }
 };
 
+/**
+ * getIPDBillsV5 — V4 plus interbranch handling.
+ *
+ * INTERBRANCH INVOICES
+ * ────────────────────
+ * When a patient's OPD is at branch A (source) but the surgery happens at
+ * branch B (operating), the SAME invoice is written into both branch DBs:
+ *
+ *   operating branch B:  interbranch_id = 0            patient_location = 'A'
+ *   source branch A:     interbranch_id = <B's inv id> patient_location = 'B'
+ *
+ * Counting both double-books the revenue. The rule is: the revenue belongs to
+ * the SOURCE branch. Exception: patient_location 'DP Road' is always treated
+ * as a source-branch copy (DP Road only ever operates), so it is counted. So on the operating branch the invoice is still listed,
+ * but it is left out of every total — billed, per-status totals, patients,
+ * discount, due.
+ *
+ * Each row gets:
+ *   interbranch_role   'operating' | 'source' | null  (null = normal invoice)
+ *   counted            1 | 0   — 0 only for 'operating' rows
+ *   patient_location   the OTHER branch's name (as stored), trimmed / NULL
+ *   interbranch_id     raw column
+ *
+ * statusWiseTotals excludes 'operating' rows server-side, so a client that
+ * sums them gets the right number without knowing about interbranch at all.
+ * interbranchSummary reports what was excluded, for display.
+ *
+ * V4 is untouched.
+ */
+// Rule lives in utils/interbranch.js (shared with targetComparisonNewModel).
+const INTERBRANCH_ROLE_SQL = interbranchRoleSql("i");
+const COUNTED_SQL = countedSql("i");
+
+const getIPDBillsV5 = async (req) => {
+  const { connection } = getConnectionByLocation(req.query.location);
+
+  if (!connection) {
+    const err = new Error("Invalid location");
+    err.status = 404;
+    throw err;
+  }
+
+  const { from, to, status = "" } = req.query;
+  const hasStatusFilter = status && status.trim() !== "";
+
+  const runQuery = (sql, params) =>
+    new Promise((resolve, reject) => {
+      connection.getConnection((err, tempCon) => {
+        if (err) return reject(err);
+        tempCon.query(sql, params, (error, result) => {
+          tempCon.release();
+          if (error) return reject(error);
+          resolve(result);
+        });
+      });
+    });
+
+  try {
+    let sql = `
+      SELECT
+          i.invoice_id,
+          i.patient_id,
+          i.creation_date AS admission_date,
+          i.due_date AS discharge_date,
+          p.name,
+          p.phone,
+          p.sex,
+          i.discount,
+          i.status,
+          i.insurancecompany,
+          i.tpa,
+          i.payable_amt,
+          i.totalamt,
+          i.totaldue,
+          i.interbranch_id,
+          NULLIF(TRIM(i.patient_location), '') AS patient_location,
+          ${INTERBRANCH_ROLE_SQL} AS interbranch_role,
+          IF(${COUNTED_SQL}, 1, 0) AS counted,
+          iv.receivedamt,
+          iv.tdsamt AS actualTDS,
+          COALESCE(SUM(
+              COALESCE(ip.cashamt, 0) +
+              COALESCE(ip.cardamt, 0) +
+              COALESCE(ip.chequeamt, 0) +
+              COALESCE(ip.onlineamt, 0)
+          ), 0) AS collection
+      FROM invoice i
+      JOIN patient p ON i.patient_id = p.patient_id
+      LEFT JOIN ipd_payment ip ON i.invoice_id = ip.invoice_id
+      LEFT JOIN insurance_invoice iv ON i.invoice_id = iv.invoiceid
+      WHERE i.creation_date >= ?
+        AND i.creation_date <= ?
+        AND i.is_deleted != 1
+    `;
+    const params = [from, to];
+
+    if (hasStatusFilter) {
+      sql += ` AND i.status = ?`;
+      params.push(status);
+    }
+
+    sql += `
+      GROUP BY
+          i.invoice_id, i.patient_id, i.creation_date, i.due_date,
+          p.name, p.phone, p.sex, i.discount, i.status,
+          i.insurancecompany, i.tpa,
+          i.payable_amt, i.totalamt, i.totaldue,
+          i.interbranch_id, i.patient_location,
+          iv.receivedamt, iv.tdsamt
+    `;
+
+    // Per-status totals — 'operating' interbranch invoices excluded, so these
+    // are this branch's real billed figures.
+    let summarySql = `
+      SELECT i.status, SUM(i.totalamt) AS total_amount
+      FROM invoice i
+      WHERE i.creation_date >= ?
+        AND i.creation_date <= ?
+        AND i.is_deleted != 1
+        AND ${COUNTED_SQL}
+    `;
+    const summaryParams = [from, to];
+
+    if (hasStatusFilter) {
+      summarySql += ` AND i.status = ?`;
+      summaryParams.push(status);
+    }
+    summarySql += ` GROUP BY i.status`;
+
+    const [rows, typeTotals] = await Promise.all([
+      runQuery(sql, params),
+      runQuery(summarySql, summaryParams),
+    ]);
+
+    await addCompanyNames(rows, connection, "admission_date", [
+      "insurancecompany",
+      "tpa",
+    ]);
+
+    // What was left out of this branch's totals, for the screen to say so.
+    const interbranchSummary = rows.reduce(
+      (acc, r) => {
+        if (r.interbranch_role === "operating") {
+          acc.excludedInvoices += 1;
+          acc.excludedAmount += Number(r.totalamt) || 0;
+        } else if (r.interbranch_role === "source") {
+          acc.sourceInvoices += 1;
+        }
+        return acc;
+      },
+      { excludedInvoices: 0, excludedAmount: 0, sourceInvoices: 0 },
+    );
+
+    return {
+      ipdBills: rows,
+      statusWiseTotals: typeTotals,
+      interbranchSummary,
+    };
+  } catch (error) {
+    console.error("Error in getIPDBillsV5:", error);
+    throw error;
+  }
+};
+
 const getStatuswiseIPDDueList = async (req) => {
   const { connection, location } = getConnectionByLocation(req.query.location);
 
@@ -1254,6 +1419,7 @@ module.exports = {
   getIPDBillsV2,
   getIPDBillsV3,
   getIPDBillsV4,
+  getIPDBillsV5,
   getStatuswiseIPDDueList,
   getIPDTotalSummary,
   getIHXData,
