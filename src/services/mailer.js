@@ -64,10 +64,19 @@ function transport() {
  *   sent === true   the message was handed to SMTP
  *   sent === false  log-only mode or a failure (reason explains which)
  *
- * @param {{to:string|string[], subject:string, text?:string, html?:string}} msg
+ * Optional, for callers other than ticketing (existing callers are unchanged):
+ *   cc        string | string[] | nodemailer address objects
+ *   fromName  display name for the From line (default "One HHC"); the address
+ *             is always TICKETING_SMTP_USER
+ *
+ * @param {{to:string|string[], subject:string, text?:string, html?:string,
+ *          cc?:string|string[]|object[], fromName?:string}} msg
  */
 async function sendMail(msg) {
   const to = Array.isArray(msg.to) ? msg.to.filter(Boolean).join(", ") : msg.to;
+  const cc = Array.isArray(msg.cc)
+    ? msg.cc.filter(Boolean)
+    : msg.cc || undefined;
 
   if (!to) return { sent: false, reason: "no recipient" };
 
@@ -81,8 +90,9 @@ async function sendMail(msg) {
 
   try {
     await transport().sendMail({
-      from: `"One HHC" <${process.env.TICKETING_SMTP_USER}>`,
+      from: `"${msg.fromName || "One HHC"}" <${process.env.TICKETING_SMTP_USER}>`,
       to,
+      ...(cc && (!Array.isArray(cc) || cc.length) ? { cc } : {}),
       subject: msg.subject,
       text: msg.text,
       html: msg.html,

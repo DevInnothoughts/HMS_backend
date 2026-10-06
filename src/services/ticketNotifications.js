@@ -73,6 +73,8 @@ const ACTION_LABEL = {
   RAISED: "Raised",
   APPROVED: "Approved",
   SENT_BACK: "Sent back",
+  RESUBMITTED: "Resubmitted",
+  WITHDRAWN: "Closed by the branch",
   SENT_TO_BRANCH: "Sent to branch to fix",
   FIXED_LOCALLY: "Fixed at the branch",
   REASSIGNED: "Re-assigned — wrong department",
@@ -227,6 +229,17 @@ const RULES = {
   SENT_BACK: {
     who: (t) => ok(t.raised_by_email),
     line: () => `Your ticket has been sent back to be reconsidered.`,
+  },
+  // The branch answered the send-back — it is waiting on the Cluster Head again.
+  RESUBMITTED: {
+    who: (t) => ok(t.cluster_head_email),
+    line: (t) =>
+      `A ticket you sent back has been resubmitted by ${t.branch_name} and needs your approval.`,
+  },
+  // The branch agreed it is not needed. An FYI to whoever sent it back.
+  WITHDRAWN: {
+    who: (t) => ok(t.cluster_head_email),
+    line: (t) => `${t.branch_name} has closed a ticket you sent back.`,
   },
   // The branch is being asked to do the work themselves.
   SENT_TO_BRANCH: {

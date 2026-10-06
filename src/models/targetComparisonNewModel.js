@@ -140,6 +140,7 @@ const DEFAULT_LOCATIONS = [
   "RR Nagar",
   "Adajan",
   "Raipur",
+  "Kalyan Nagar",
 ];
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────

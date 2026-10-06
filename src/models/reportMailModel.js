@@ -59,6 +59,7 @@ const locations = [
   "Adajan",
   "RR Nagar",
   "Raipur",
+  "Kalyan Nagar",
 ];
 
 // Execute query helper

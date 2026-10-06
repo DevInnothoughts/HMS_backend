@@ -264,7 +264,21 @@ async function getBranchSummary({ from, to, locations }) {
 //                                                     revenuePerNewPatient },
 //                                              yoy: { … } },   (% change)
 //                                    prev: { mom, yoy },       (raw figures)
-//                                    opd, ipd, pharmacy, error? }] }
+//                                    opd, ipd, pharmacy,
+//                                    mix: { opd, ipd, lab, pharmacy },
+//                                    perNewPatient: { opd, ipd, lab,
+//                                                     pharmacy },
+//                                    error? }] }
+//
+// ⚠️ REVENUE MIX PER NEW PATIENT
+// ──────────────────────────────
+// `mix` splits totalRevenue into four parts that ADD UP to it: OPD is net of
+// lab here (lab is its own part), so OPD + IPD + LAB + PHARMACY = totalRevenue
+// and the four per-new-patient figures add up to revenuePerNewPatient. The
+// top-level `opd` stays gross, as before. Cost: no extra query — lab comes out
+// of the OPD query already running (see periodFiguresModel), and the lab
+// names are read once per request from a 5-minute cache. If those names can't
+// be read, lab is null and OPD stays gross, rather than showing lab as ₹0.
 //
 // Added alongside V1 rather than replacing it, so an older app build still on
 // /branchSummary keeps working through the rollout.
@@ -333,10 +347,27 @@ const growthOf = (cur, mom, yoy) => {
  * add a getLocationSummary call per range. The current figures come from that
  * same read, so a figure and its growth always share one definition.
  */
-async function readBranchV2(location, from, to) {
+/** Four parts of totalRevenue — OPD net of lab when lab is known. */
+const mixOf = (cur) => ({
+  opd: cur.lab == null ? cur.opd : Math.max(0, cur.opd - cur.lab),
+  ipd: cur.ipd,
+  lab: cur.lab,
+  pharmacy: cur.pharmacy,
+});
+
+/** Each part ÷ new patients — null with no new patients, or an unknown part. */
+const perNewOf = (mix, newPatients) => ({
+  opd: mix.opd == null ? null : perNew(mix.opd, newPatients),
+  ipd: mix.ipd == null ? null : perNew(mix.ipd, newPatients),
+  lab: mix.lab == null ? null : perNew(mix.lab, newPatients),
+  pharmacy: mix.pharmacy == null ? null : perNew(mix.pharmacy, newPatients),
+});
+
+async function readBranchV2(location, from, to, labNames = null) {
   const ranges = comparisonRanges(from, to);
-  const f = await readPeriodFigures(location, ranges);
+  const f = await readPeriodFigures(location, ranges, labNames);
   const cur = f.cur;
+  const mix = mixOf(cur);
 
   return {
     location,
@@ -349,10 +380,13 @@ async function readBranchV2(location, from, to) {
       mom: { newPatients: f.mom.newPatients, totalRevenue: f.mom.totalRevenue },
       yoy: { newPatients: f.yoy.newPatients, totalRevenue: f.yoy.totalRevenue },
     },
-    // Not shown on the screen; returned so a figure can be reconciled.
+    // Gross figures, unchanged — returned so a figure can be reconciled.
     opd: cur.opd,
     ipd: cur.ipd,
     pharmacy: cur.pharmacy,
+    // Revenue mix (adds up to totalRevenue) and each part per new patient.
+    mix,
+    perNewPatient: perNewOf(mix, cur.newPatients),
   };
 }
 
@@ -375,13 +409,23 @@ async function getBranchSummaryV2({ from, to, locations }) {
     throw err;
   }
 
+  // Once per request (5-minute cache behind it), never per branch. null on
+  // failure → lab not split, rather than every branch showing lab as ₹0.
+  const labNames = await getLabConsultationNames().catch((e) => {
+    console.error("branchSummaryV2: lab names unavailable:", e.message);
+    return null;
+  });
+
   const results = [];
   for (let i = 0; i < wanted.length; i += BATCH) {
     const slice = wanted.slice(i, i + BATCH);
     const settled = await Promise.all(
       slice.map(async (loc) => {
         try {
-          return await withRetry(() => readBranchV2(loc, from, to), loc);
+          return await withRetry(
+            () => readBranchV2(loc, from, to, labNames),
+            loc,
+          );
         } catch (err) {
           console.error(`branchSummaryV2: ${loc} failed:`, err.message);
           return { location: loc, error: err.message };
@@ -404,6 +448,17 @@ async function getBranchSummaryV2({ from, to, locations }) {
   };
   // Pooled, never an average of branch ratios.
   totals.revenuePerNewPatient = perNew(totals.totalRevenue, totals.newPatients);
+  const mixSum = (k) =>
+    labNames == null && k === "lab"
+      ? null
+      : ok.reduce((a, r) => a + n0(r.mix?.[k]), 0);
+  totals.mix = {
+    opd: mixSum("opd"),
+    ipd: mixSum("ipd"),
+    lab: mixSum("lab"),
+    pharmacy: mixSum("pharmacy"),
+  };
+  totals.perNewPatient = perNewOf(totals.mix, totals.newPatients);
   // Pooled comparison figures → estate-wide growth.
   const prevSum = (k, f) => ok.reduce((a, r) => a + n0(r.prev?.[k]?.[f]), 0);
   totals.prev = {

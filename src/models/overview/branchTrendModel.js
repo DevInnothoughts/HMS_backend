@@ -4,16 +4,29 @@
 // line charts opened from Branch Summary.
 //
 //   GET /overview/branchTrend?location=Baner
-//     → { meta, monthly: [bucket×12], quarterly: [bucket×8], yearly: [bucket×5] }
+//     → { meta, monthly: [bucket×12], quarterly: [bucket×8], yearly: [bucket×4] }
 //
 //   bucket = { key, label, from, to, partial,
-//              newPatients, opd, ipd, pharmacy, totalRevenue,
-//              revenuePerNewPatient }
+//              newPatients, opd, lab, ipd, pharmacy, totalRevenue,
+//              revenuePerNewPatient,
+//              mix: { opd, ipd, lab, pharmacy },
+//              perNewPatient: { opd, ipd, lab, pharmacy } }
+//
+// ⚠️ REVENUE MIX PER NEW PATIENT — NO EXTRA QUERY
+// ───────────────────────────────────────────────
+// Same rules as Branch Summary V2: lab is split out INSIDE the OPD query (a
+// conditional SUM over the same rows), using the LAB consultation names from
+// targetComparisonNewModel.getLabConsultationNames (5-minute cache). `opd`
+// stays gross; `mix.opd` is net of lab, so the four mix parts add up to
+// totalRevenue and the four perNewPatient figures to revenuePerNewPatient.
+// If the lab names can't be read, lab is null and mix.opd stays gross.
 //
 // ⚠️ ONE PASS, ALL THREE VIEWS
 // ────────────────────────────
-// Every figure is read ONCE, grouped by calendar month, over the five
-// financial years the yearly view needs. Quarters and years are then summed
+// Every figure is read ONCE, grouped by calendar month, over the four
+// financial years the yearly view needs (from 1 April three FYs before the
+// current one — e.g. 1 Apr 2023 during FY 26-27). Was five; cut to four to
+// read less history per open. Quarters and years are then summed
 // from those months in JS. So switching Monthly → Quarterly → Yearly on the
 // phone is instant and the three views can never disagree with each other.
 //
@@ -46,13 +59,24 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../../databaseUtils");
+const { getLabConsultationNames } = require("../targetComparisonNewModel");
 
 const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
 ];
 
-const WINDOW = { monthly: 12, quarterly: 8, yearly: 5 };
+const WINDOW = { monthly: 12, quarterly: 8, yearly: 4 };
 
 const n0 = (v) => Number(v) || 0;
 const pad = (n) => String(n).padStart(2, "0");
@@ -93,8 +117,19 @@ const NEW_SQL = `
   GROUP BY ym
 `;
 
-const OPD_SQL = `
-  SELECT DATE_FORMAT(item_date, '%Y-%m') AS ym, COALESCE(SUM(total), 0) AS v
+// Same normalized-name match as getLabRevenue / periodFiguresModel.
+const LAB_NORM = "REPLACE(LOWER(COALESCE(consultation, '')), ' ', '')";
+
+const opdSql = (labCount) => `
+  SELECT DATE_FORMAT(item_date, '%Y-%m') AS ym,
+         COALESCE(SUM(total), 0) AS v,
+         ${
+           labCount > 0
+             ? `COALESCE(SUM(CASE WHEN ${LAB_NORM} IN (${Array(labCount)
+                 .fill("?")
+                 .join(", ")}) THEN total ELSE 0 END), 0)`
+             : "0"
+         } AS lab
   FROM patient_itemreceipt
   WHERE item_date >= ? AND item_date < ?
     AND payment_mode IN ('Cash', 'Card', 'Online', 'UPI')
@@ -200,13 +235,14 @@ function evitalAmount(row) {
 
 // ─── Read ────────────────────────────────────────────────────────────────────
 
-const toMap = (rows) => {
+const toMap = (rows, col = "v") => {
   const m = {};
-  for (const r of rows || []) if (r.ym) m[r.ym] = n0(r.v);
+  for (const r of rows || []) if (r.ym) m[r.ym] = n0(r[col]);
   return m;
 };
 
-async function readMonths(location, fromDt, toExclDt) {
+/** labNames: normalized LAB names, or null → lab not split (lab: null). */
+async function readMonths(location, fromDt, toExclDt, labNames = null) {
   const { connection } = getConnectionByLocation(location);
   if (!connection) {
     const err = new Error(`Invalid location: ${location}`);
@@ -218,7 +254,14 @@ async function readMonths(location, fromDt, toExclDt) {
   // Sequential on purpose: branch pools are capped at 5 connections and
   // Branch Summary may still be reading this same branch.
   const newPt = toMap(await runOn(connection, NEW_SQL, p));
-  const opd = toMap(await runOn(connection, OPD_SQL, p));
+  const labList = Array.isArray(labNames) ? labNames : [];
+  // Lab placeholders sit in the SELECT, so their params come first.
+  const opdRows = await runOn(connection, opdSql(labList.length), [
+    ...labList,
+    ...p,
+  ]);
+  const opd = toMap(opdRows);
+  const lab = Array.isArray(labNames) ? toMap(opdRows, "lab") : null;
   const ipd = toMap(await runOn(connection, IPD_SQL, p));
   const pharmacy = toMap(
     await runOn(
@@ -236,7 +279,7 @@ async function readMonths(location, fromDt, toExclDt) {
     pharmacy[r.ym] = n0(pharmacy[r.ym]) + evitalAmount(r);
   }
 
-  return { newPt, opd, ipd, pharmacy };
+  return { newPt, opd, lab, ipd, pharmacy };
 }
 
 // ─── Bucketing ───────────────────────────────────────────────────────────────
@@ -250,6 +293,7 @@ function emptyBucket(key, label, from, to) {
     partial: false,
     newPatients: 0,
     opd: 0,
+    lab: 0,
     ipd: 0,
     pharmacy: 0,
     totalRevenue: 0,
@@ -288,10 +332,16 @@ function buildTrend(data, today) {
     const from = `${k}-01`;
     const to = isCurrent ? todayStr : `${k}-${pad(lastDay(y, m))}`;
 
-    const b = emptyBucket(k, `${MONTHS[m - 1]} '${String(y).slice(2)}`, from, to);
+    const b = emptyBucket(
+      k,
+      `${MONTHS[m - 1]} '${String(y).slice(2)}`,
+      from,
+      to,
+    );
     b.partial = isCurrent;
     b.newPatients = n0(data.newPt[k]);
     b.opd = Math.round(n0(data.opd[k]));
+    b.lab = data.lab ? Math.round(n0(data.lab[k])) : null;
     b.ipd = Math.round(n0(data.ipd[k]));
     b.pharmacy = Math.round(n0(data.pharmacy[k]));
     monthly.push(b);
@@ -313,6 +363,7 @@ function buildTrend(data, today) {
       agg.partial = agg.partial || isCurrent;
       agg.newPatients += b.newPatients;
       agg.opd += b.opd;
+      agg.lab = b.lab == null || agg.lab == null ? null : agg.lab + b.lab;
       agg.ipd += b.ipd;
       agg.pharmacy += b.pharmacy;
     }
@@ -322,6 +373,19 @@ function buildTrend(data, today) {
     list.map((b) => {
       b.totalRevenue = b.opd + b.ipd + b.pharmacy;
       b.revenuePerNewPatient = perNew(b.totalRevenue, b.newPatients);
+      // Four parts of totalRevenue — OPD net of lab when lab is known.
+      b.mix = {
+        opd: b.lab == null ? b.opd : Math.max(0, b.opd - b.lab),
+        ipd: b.ipd,
+        lab: b.lab,
+        pharmacy: b.pharmacy,
+      };
+      b.perNewPatient = {
+        opd: perNew(b.mix.opd, b.newPatients),
+        ipd: perNew(b.mix.ipd, b.newPatients),
+        lab: b.mix.lab == null ? null : perNew(b.mix.lab, b.newPatients),
+        pharmacy: perNew(b.mix.pharmacy, b.newPatients),
+      };
       return b;
     });
 
@@ -351,7 +415,13 @@ async function getBranchTrend({ location }) {
     t.getUTCDate(),
   )} 00:00:00`;
 
-  const data = await readMonths(location, fromDt, toExclDt);
+  // 5-minute cache behind it. null on failure → lab not split, never ₹0.
+  const labNames = await getLabConsultationNames().catch((e) => {
+    console.error("branchTrend: lab names unavailable:", e.message);
+    return null;
+  });
+
+  const data = await readMonths(location, fromDt, toExclDt, labNames);
 
   return {
     meta: {

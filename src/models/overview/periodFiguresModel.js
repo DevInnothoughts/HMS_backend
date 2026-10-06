@@ -5,7 +5,10 @@
 // MoM and YoY comparison ranges.
 //
 //   readPeriodFigures(location, { cur: {from,to}, mom: {from,to}, yoy: {from,to} })
-//     → { cur: { newPatients, opd, ipd, pharmacy, totalRevenue }, mom: …, yoy: … }
+//     → { cur: { newPatients, opd, lab, ipd, pharmacy, totalRevenue }, mom: …, yoy: … }
+//
+//   opd is GROSS (lab included) — unchanged, so totalRevenue is unchanged.
+//   lab is the LAB slice of that opd, or null when no lab names were passed.
 //
 // ⚠️ ONE PASS, GROUPED BY DAY
 // ───────────────────────────
@@ -25,6 +28,14 @@
 // as in branchTrendModel, so a day is always counted whole.
 //
 // New patients: confirmed, not deleted, patient_type = 'New'.
+//
+// ⚠️ LAB COSTS NO EXTRA QUERY
+// ───────────────────────────
+// Lab is billed through patient_itemreceipt, so it is split out INSIDE the OPD
+// query with a conditional SUM over the same rows — same scan, one more column.
+// Which consultations count as LAB comes from consultationMasterData via
+// targetComparisonNewModel.getLabConsultationNames (cached 5 min), read ONCE
+// per request by the caller and passed in — not once per branch.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../../databaseUtils");
@@ -61,8 +72,20 @@ const NEW_SQL = `
   GROUP BY d
 `;
 
-const OPD_SQL = `
-  SELECT ${DAY("item_date")} AS d, COALESCE(SUM(total), 0) AS v
+// The normalized-name match is the same one getLabRevenue uses, so this lab
+// figure equals Target Comparison's for the same branch and dates.
+const LAB_NORM = "REPLACE(LOWER(COALESCE(consultation, '')), ' ', '')";
+
+const opdSql = (labCount) => `
+  SELECT ${DAY("item_date")} AS d,
+         COALESCE(SUM(total), 0) AS v,
+         ${
+           labCount > 0
+             ? `COALESCE(SUM(CASE WHEN ${LAB_NORM} IN (${Array(labCount)
+                 .fill("?")
+                 .join(", ")}) THEN total ELSE 0 END), 0)`
+             : "0"
+         } AS lab
   FROM patient_itemreceipt
   WHERE item_date >= ? AND item_date < ?
     AND payment_mode IN ('Cash', 'Card', 'Online', 'UPI')
@@ -109,9 +132,9 @@ const EVITAL_SQL = `
   WHERE ${BILL_DATE} >= ? AND ${BILL_DATE} < ?
 `;
 
-const toDayMap = (rows) => {
+const toDayMap = (rows, col = "v") => {
   const m = {};
-  for (const r of rows || []) if (r.d) m[r.d] = n0(r.v);
+  for (const r of rows || []) if (r.d) m[r.d] = n0(r[col]);
   return m;
 };
 
@@ -122,7 +145,13 @@ const sumRange = (map, from, to) => {
   return s;
 };
 
-async function readPeriodFigures(location, ranges) {
+/**
+ * @param {string} location
+ * @param {object} ranges     { key: { from, to } }
+ * @param {string[]|null} labNames  normalized LAB consultation names; null or
+ *                            omitted → lab is not split out (lab: null)
+ */
+async function readPeriodFigures(location, ranges, labNames = null) {
   const { connection } = getConnectionByLocation(location);
   if (!connection) throw new Error("Invalid location");
 
@@ -137,7 +166,15 @@ async function readPeriodFigures(location, ranges) {
   // Sequential on purpose — branch pools are capped at 5 connections and are
   // shared with the staff working at the branch.
   const newPt = toDayMap(await runOn(connection, NEW_SQL, p));
-  const opd = toDayMap(await runOn(connection, OPD_SQL, p));
+  const splitLab = Array.isArray(labNames);
+  const labList = splitLab ? labNames : [];
+  // Lab placeholders sit in the SELECT, so their params come first.
+  const opdRows = await runOn(connection, opdSql(labList.length), [
+    ...labList,
+    ...p,
+  ]);
+  const opd = toDayMap(opdRows);
+  const lab = toDayMap(opdRows, "lab");
   const ipd = toDayMap(await runOn(connection, IPD_SQL, p));
   const pharmacy = toDayMap(
     await runOn(
@@ -160,6 +197,7 @@ async function readPeriodFigures(location, ranges) {
     out[key] = {
       newPatients: sumRange(newPt, r.from, r.to),
       opd: o,
+      lab: splitLab ? Math.round(sumRange(lab, r.from, r.to)) : null,
       ipd: i,
       pharmacy: ph,
       totalRevenue: o + i + ph,

@@ -35,6 +35,7 @@ const hexaLeadController = require("./src/controllers/hexaLeadsController");
 const { sendApprovalReminders } = require("./src/models/ticketingModel");
 const { isReminderWindow } = require("./src/services/businessHours");
 const practoLeadController = require("./src/controllers/practoLeadController");
+const websiteAppointmentController = require("./src/controllers/websiteAppointmentController");
 const overViewController = require("./src/controllers/overviewController");
 
 const {
@@ -105,6 +106,7 @@ const locations = [
   "RR Nagar",
   "Adajan",
   "Raipur",
+  "Kalyan Nagar",
 ];
 
 app.use(express.json());
@@ -140,6 +142,8 @@ app.use("/hms/ticketing", ticketingController);
 app.use("/hms/recruitment", recruitmentController);
 app.use("/hms/hexaLead", hexaLeadController);
 app.use("/hms/practoLead", practoLeadController);
+// Website "Book Appointment" form (replaces book-appointment-mail.php)
+app.use("/hms/websiteAppointment", websiteAppointmentController);
 app.use("/hms/overview", overViewController);
 
 // Error handling middleware

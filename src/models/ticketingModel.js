@@ -336,6 +336,28 @@ const TRANSITIONS = {
     label: "Send back for reconsideration",
     remarkRequired: true,
   },
+  // ── The branch's answer to a send-back ───────────────────────────────────
+  // Sent Back used to be a dead end: nothing listed it in `from`, so the raiser
+  // — the one person the ticket was waiting on — was offered no action at all.
+  // The branch either answers the Cluster Head's question and puts the ticket
+  // back in front of them, or agrees it is not needed and closes it.
+  resubmit: {
+    from: [STATUS.SENT_BACK],
+    to: STATUS.OPEN,
+    roles: [ROLES.PARTNER, ROLES.SUPER_ADMIN],
+    raiserOrBranchPartner: true,
+    label: "Resubmit to Cluster Head",
+    // The answer to what the Cluster Head asked. Without it the same ticket
+    // just comes back unchanged and gets sent back again.
+    remarkRequired: true,
+  },
+  withdraw: {
+    from: [STATUS.SENT_BACK],
+    to: STATUS.CLOSED,
+    roles: [ROLES.PARTNER, ROLES.SUPER_ADMIN],
+    raiserOrBranchPartner: true,
+    label: "Close ticket",
+  },
   // ── Local fix path (Operations) ──────────────────────────────────────────
   // Some issues are faster fixed by the branch than routed through a
   // department. The Cluster Head makes that call instead of approving, and only
@@ -442,6 +464,20 @@ const TRANSITIONS = {
     label: "Reopen",
     remarkRequired: true,
   },
+  // SuperAdmin only: close a ticket at ANY stage — stuck, duplicate, raised by
+  // mistake, or nobody left to close it. Not offered where the ordinary close
+  // already applies (Resolved, Sent Back), so there is never a second Close
+  // button. Remark required: skipping the whole workflow must say why.
+  adminClose: {
+    from: ALL_STATUSES.filter(
+      (s) =>
+        s !== STATUS.CLOSED && s !== STATUS.RESOLVED && s !== STATUS.SENT_BACK,
+    ),
+    to: STATUS.CLOSED,
+    roles: [ROLES.SUPER_ADMIN],
+    label: "Close ticket (admin)",
+    remarkRequired: true,
+  },
   comment: {
     from: ALL_STATUSES,
     to: null, // status unchanged
@@ -509,6 +545,13 @@ const ACTION_LOG = {
   reopen: "REOPENED",
   comment: "COMMENT",
   sendToBranch: "SENT_TO_BRANCH",
+  // Own verbs, not RAISED / CLOSED: CLOSED emails the raiser "your ticket has
+  // been closed" — about a close they just did themselves.
+  // Same verb as a normal close: the raiser is emailed that it closed, and the
+  // remark in the trail says why.
+  adminClose: "CLOSED",
+  resubmit: "RESUBMITTED",
+  withdraw: "WITHDRAWN",
   fixedLocally: "FIXED_LOCALLY",
   // Deliberately the same verbs as their department-path twins — the trail
   // should read "resolved it", not name an internal variant.
@@ -908,7 +951,9 @@ function denyReason(action, ticket, actor) {
   // Reopening belongs to the branch: the raiser, or a Partner accountable for
   // that branch. The department head closes it; the branch is who gets to say
   // the close was wrong.
-  if (t.raiserOrBranchPartner) {
+  // SuperAdmin is exempt: they can already see every ticket, and without this
+  // they could never close a ticket raised by anyone else.
+  if (t.raiserOrBranchPartner && actor.role !== ROLES.SUPER_ADMIN) {
     const isRaiser = ticket.raised_by_mobile === actor.mobile;
     const isBranchPartner =
       actor.role === ROLES.PARTNER &&
@@ -1747,6 +1792,24 @@ async function transitionTicket(req, action) {
           .join(". ");
         break;
       }
+
+      case "resubmit":
+        // Back at the approval stage, so the Cluster Head's approval clock
+        // starts again — and the reminder is re-armed, otherwise a ticket
+        // that was chased once before being sent back is never chased again.
+        push(
+          "approval_due_at = ?",
+          addWorkingHours(nowSql, CONFIG.APPROVAL_DEADLINE_HOURS),
+        );
+        push("approval_reminder_sent_at = NULL");
+        break;
+
+      case "withdraw":
+      case "adminClose":
+        push("closed_by_mobile = ?", actor.mobile);
+        push("closed_by_name = ?", actor.name);
+        push("closed_at = ?", nowSql);
+        break;
 
       case "fixedLocally":
         // No resolved_* yet — the branch did the work, the Cluster Head

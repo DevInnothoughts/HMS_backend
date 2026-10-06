@@ -102,6 +102,8 @@ const DEFAULT_LOCATIONS = [
   "Kalyan",
   "Bopal",
   "Electronic City",
+  "Raipur",
+  "Kalyan Nagar",
 ];
 
 // ─── SMALL HELPERS ───────────────────────────────────────────────────────────

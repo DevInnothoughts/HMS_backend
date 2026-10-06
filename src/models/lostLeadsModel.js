@@ -126,7 +126,10 @@ const LOCATION_ALIASES = {
   Hadapsar: ["Hadapsar"],
   Kalyan: ["Kalyan"],
   Bopal: ["Bopal"],
+  "RR Nagar": ["RR Nagar"],
+  Adajan: ["Adajan"],
   "Electronic City": ["Electronic City", "Electronics City"],
+  "Kalyan Nagar": ["Kalyan Nagar"],
 };
 
 const ALL_LOCATIONS = Object.keys(LOCATION_ALIASES);

@@ -19,6 +19,8 @@
 //   POST   /tickets/:id/approve      Cluster Head  → Approved
 //                                     (sets department, priority, resolution time)
 //   POST   /tickets/:id/reconsider   Cluster Head  → Sent Back
+//   POST   /tickets/:id/resubmit     Raiser        → Open (back to the Cluster Head)
+//   POST   /tickets/:id/withdraw     Raiser        → Closed (from Sent Back)
 //   POST   /tickets/:id/progress     Dept Head/User→ In Progress | Waiting for Vendor
 //   POST   /tickets/:id/assign       Dept Head     → Assigned (to a team member)
 //   POST   /tickets/:id/fix          Dept User     → Pending Approval
@@ -29,6 +31,7 @@
 //   POST   /tickets/:id/resolve      Dept Head     → Resolved
 //   POST   /tickets/:id/close        Branch        → Closed
 //   POST   /tickets/:id/reopen       Raiser        → Reopened
+//   POST   /tickets/:id/admin-close  SuperAdmin    → Closed, from any stage
 //   POST   /tickets/:id/comment      anyone with access
 //
 //   GET    /users                    Dept Head: their own team
@@ -115,6 +118,9 @@ router.get("/tickets/:id", send(getTicket));
 // ─── workflow ────────────────────────────────────────────────────────────────
 router.post("/tickets/:id/approve", transition("approve"));
 router.post("/tickets/:id/reconsider", transition("reconsider"));
+// The branch's answer to a send-back — without these, Sent Back was a dead end.
+router.post("/tickets/:id/resubmit", transition("resubmit"));
+router.post("/tickets/:id/withdraw", transition("withdraw"));
 // Local fix (Operations) — the Cluster Head hands it to the branch instead of a
 // department, and signs off the branch's own fix.
 router.post("/tickets/:id/send-to-branch", transition("sendToBranch"));
@@ -127,6 +133,7 @@ router.post("/tickets/:id/forward", transition("forward"));
 router.post("/tickets/:id/resolve", transition("resolve"));
 router.post("/tickets/:id/close", transition("close"));
 router.post("/tickets/:id/reopen", transition("reopen"));
+router.post("/tickets/:id/admin-close", transition("adminClose"));
 router.post("/tickets/:id/comment", transition("comment"));
 router.post("/tickets/:id/assign", transition("assign"));
 router.post("/tickets/:id/fix", transition("fix"));
