@@ -1,5 +1,6 @@
 const { default: axios } = require("axios");
 const { getConnectionByLocation } = require("../../databaseUtils");
+const { countedSql } = require("./utils/interbranch");
 
 const REFERENCE_TYPE_MAP = {
   dr_ref: "Referred By Doctor",
@@ -292,16 +293,53 @@ async function getReferenceV2(req) {
 
   const getCounts = async () => {
     try {
-      // Step 1: Get total invoice count (in same date range, only for patients that are confirmed & not deleted)
-      const totalInvoiceCountQuery = `
-      SELECT COUNT(*) AS totalInvoiceCount
+      // ── IPD with the interbranch rule ─────────────────────────────────────
+      // Same rule as the IPD Invoice page and the Home surgery count
+      // (utils/interbranch.js): an operating-branch copy of an interbranch
+      // invoice belongs to the SOURCE branch, so it is left out of this
+      // branch's IPD and reported separately as `interbranchPatientCount`
+      // (distinct patients operated here for another branch).
+      //
+      // One grouped query instead of one per reference type. It also fixes
+      // the old `p.reference_type = ?` lookup, which never matched NULL — the
+      // "Unknown" row always showed 0 IPD while the total still included them.
+      const counted = countedSql("i");
+      const invoiceByTypeQuery = `
+      SELECT p.reference_type,
+             SUM(CASE WHEN ${counted} THEN 1 ELSE 0 END) AS invoiceCount,
+             COUNT(DISTINCT CASE WHEN ${counted} THEN NULL ELSE i.patient_id END)
+               AS interbranchPatientCount
       FROM invoice i
       JOIN patient p ON i.patient_id = p.patient_id
-      WHERE p.date >= ? AND p.date <= ? 
+      WHERE p.date >= ? AND p.date <= ?
       AND p.ConfirmPatient = 1 AND p.is_deleted = 0
+      GROUP BY p.reference_type
     `;
-      const [{ totalInvoiceCount }] = await executeQuery(
-        totalInvoiceCountQuery,
+      const invoiceRows = await executeQuery(invoiceByTypeQuery, [
+        req.query.from,
+        req.query.to,
+      ]);
+      const typeKey = (t) => (t == null ? "\u0000null" : String(t));
+      const invoiceByType = {};
+      let totalInvoiceCount = 0;
+      for (const r of invoiceRows) {
+        const inv = Number(r.invoiceCount) || 0;
+        invoiceByType[typeKey(r.reference_type)] = {
+          invoiceCount: inv,
+          interbranchPatientCount: Number(r.interbranchPatientCount) || 0,
+        };
+        totalInvoiceCount += inv;
+      }
+
+      // Distinct across the whole range: a patient can only have one
+      // reference type, so this equals the sum of the per-type counts.
+      const [{ totalInterbranchPatientCount }] = await executeQuery(
+        `SELECT COUNT(DISTINCT CASE WHEN ${counted} THEN NULL ELSE i.patient_id END)
+                AS totalInterbranchPatientCount
+         FROM invoice i
+         JOIN patient p ON i.patient_id = p.patient_id
+         WHERE p.date >= ? AND p.date <= ?
+         AND p.ConfirmPatient = 1 AND p.is_deleted = 0`,
         [req.query.from, req.query.to],
       );
 
@@ -349,21 +387,9 @@ async function getReferenceV2(req) {
         const count = item.count;
         const refType = item.reference_type;
 
-        // Step 3: Get invoice count for this reference type
-        const invoiceCountQuery = `
-        SELECT COUNT(*) AS invoiceCount
-        FROM invoice i
-        JOIN patient p ON i.patient_id = p.patient_id
-        WHERE p.date >= ? AND p.date <= ?
-        AND p.ConfirmPatient = 1
-        AND p.is_deleted = 0
-        AND p.reference_type = ?
-      `;
-        const [{ invoiceCount }] = await executeQuery(invoiceCountQuery, [
-          req.query.from,
-          req.query.to,
-          refType,
-        ]);
+        // Step 3: IPD for this reference type, from the grouped query above
+        const { invoiceCount = 0, interbranchPatientCount = 0 } =
+          invoiceByType[typeKey(refType)] || {};
 
         const percentage = Math.round((count / totalCount) * 100);
         const invoicePercentage =
@@ -377,6 +403,7 @@ async function getReferenceV2(req) {
           percentage,
           invoiceCount,
           invoicePercentage,
+          interbranchPatientCount,
         });
       }
 
@@ -384,6 +411,7 @@ async function getReferenceV2(req) {
         referenceTypeCount: transformedData,
         totalCount,
         totalInvoiceCount,
+        totalInterbranchPatientCount: Number(totalInterbranchPatientCount) || 0,
       };
     } catch (error) {
       console.error("Error executing queries:", error);
@@ -431,6 +459,8 @@ async function getReferenceMonthwise(req) {
     WHERE p.date >= ? AND p.date <= ?
       AND p.ConfirmPatient = 1
       AND p.is_deleted = 0
+      -- interbranch rule (utils/interbranch.js), same as referenceV2
+      AND ${countedSql("i")}
     GROUP BY ym, p.reference_type`;
 
   const load = async (y) => {

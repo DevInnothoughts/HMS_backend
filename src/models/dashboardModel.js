@@ -481,6 +481,7 @@ async function getOPDReportData(req) {
               ap.FDE_Name,
               ap.executivechk,
                ap.is_deleted,
+               p.patient_id,
               p.name AS patient_name,
               p.sex AS gender,
               d.name AS doctor_name
@@ -503,6 +504,7 @@ async function getOPDReportData(req) {
               ap.FDE_Name,
               ap.executivechk,
                ap.is_deleted,
+               p.patient_id,
               p.name AS patient_name,
               p.sex AS gender,
               d.name AS doctor_name
@@ -525,6 +527,7 @@ async function getOPDReportData(req) {
         ap.FDE_Name,
         ap.executivechk,
         ap.is_deleted,
+        p.patient_id,
         p.name AS patient_name,
         p.sex AS gender,
         d.name AS doctor_name

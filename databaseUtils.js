@@ -49,7 +49,7 @@ const conTicketing = createPool("serviceTicketing");
 const conRRNagar = createPool("hmsRRNagarDB");
 const conAdajan = createPool("hmsAdajanDB");
 const conRaipur = createPool("hmsRaipurDB");
-const conKalyanNagar = createPool("hmsKalyanNagarDB");
+const conKalyanNagar = createPool("hmsKalyannagarDB");
 
 const getConnectionByLocation = (loc) => {
   let connection;
