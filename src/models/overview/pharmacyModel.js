@@ -34,6 +34,32 @@
 // invoice.total the mode split and the revenue disagree; `modeDrift` reports
 // the difference rather than absorbing it.
 //
+// ⚠️ PATIENT TYPE = THE VISIT THE BILL CAME FROM
+// ───────────────────────────────────────────────
+// A pharmacy bill links to a PATIENT only (evital_pharmacy_invoice.patient_id)
+// — not to an appointment. Joining the patient's LATEST appointment (as this
+// section first did) mislabels history: a patient New on the 3rd and
+// Follow-up on the 20th had BOTH bills counted as Follow-up, so New was
+// understated every month.
+//
+// Now each bill / prescription is credited to the patient's LAST CONFIRMED,
+// NON-DELETED appointment ON OR BEFORE the bill's own date (visitIndex /
+// typeOn below). The New-visit purchase stays New; the 20th's is Follow-up.
+// Read-only — no table or column is added. Applied to BOTH the conversion
+// counts and the revenue-by-type block, so the two always agree.
+//
+// ⚠️ REVENUE BY PATIENT TYPE — THE SAME ROWS AS "TAKEN"
+// ──────────────────────────────────────────────────────
+// Built inside gatherPrescriptions from exactly the prescriptions counted as
+// TAKEN in the conversion table — same rows, same date (created_at), same
+// visit lookup — so PATIENTS equals TAKEN for every type, by construction.
+// Revenue is each taken prescription's bill, counted the way the headline
+// counts it (Other payment modes excluded).
+//
+// What this leaves out is reported, not hidden: in-house bills (no patient
+// link) and counter sales without a prescription (refills, OTC, no patient)
+// are returned as `inhouse` and `withoutRx`.
+//
 // ⚠️ DP ROAD
 // ──────────
 // getLocationSummary routes DP Road's "pharmacy" through patient_receipt with
@@ -116,45 +142,97 @@ const EVITAL_SQL = `
          ) BETWEEN ? AND ?
 `;
 
-// Reproduces getPrescriptionPurchaseAnalysisQuantityV2's join exactly.
+// Prescriptions dispensed at the eVital counter. The patient type is NOT
+// joined here any more — see "PATIENT TYPE = THE VISIT THE BILL CAME FROM" in
+// the header; `rx_day` is what typeOn() looks the visit up by.
 //
-// ⚠️ THE PATIENT TYPE IS THE PATIENT'S LATEST APPOINTMENT, NOT THE ONE NEAR
-//    THIS BILL. MAX(appointment_id) picks their most recent confirmed visit
-//    whenever it happened, so a patient who was New in January and Follow-up in
-//    August is labelled Follow-up on their January prescription.
-//
-//    That is roughly right for "today" and wrong for a historical range. It is
-//    reproduced rather than corrected so this section agrees with the Pharmacy
-//    Analysis screen — fixing it here alone would make two screens disagree.
-//    The correct join is the appointment nearest the bill date; change BOTH,
-//    deliberately, as its own task.
-//
-// Note the date column: created_at, matching the analysis screen. The revenue
-// queries above use the bill_date inside the JSON. The two can differ by a day
-// at a month boundary — another reason these counts and the revenue figure are
-// reported separately rather than divided into each other.
+// Date column: created_at, matching the Pharmacy Analysis screen. The revenue
+// figures use the bill_date inside the JSON; the two can differ by a day at a
+// month boundary.
 const PRESCRIPTION_SQL = `
   SELECT epi.prescription_details,
          epi.invoice_details,
+         epi.UpdatedInvoiceDetails,
          epi.patient_id,
-         ap.patient_type
+         DATE_FORMAT(epi.created_at, '%Y-%m-%d') AS rx_day
     FROM evital_pharmacy_invoice epi
-    LEFT JOIN (
-      SELECT a1.patient_id, a1.patient_type
-        FROM appointment a1
-        INNER JOIN (
-          SELECT patient_id, MAX(appointment_id) AS latest_id
-            FROM appointment
-           WHERE confirm_time != 0
-           GROUP BY patient_id
-        ) a2 ON a1.appointment_id = a2.latest_id
-    ) ap ON ap.patient_id = epi.patient_id
    WHERE epi.prescription_details IS NOT NULL
      AND epi.patient_id IS NOT NULL
      AND epi.created_at BETWEEN ? AND ?
 `;
 
+// Every confirmed visit, up to the end of the window, of the patients who
+// bought or were prescribed in it. Unbounded below on purpose: a Post-op
+// patient buying today may have had that visit weeks ago.
+const VISIT_HISTORY_SQL = `
+  SELECT patient_id,
+         patient_type,
+         DATE_FORMAT(appointment_timestamp, '%Y-%m-%d') AS d
+    FROM appointment
+   WHERE patient_id IN (?)
+     AND confirm_time != 0
+     AND is_deleted != 1
+     AND appointment_timestamp <= ?
+   ORDER BY patient_id, appointment_timestamp, appointment_id
+`;
+
+/* ── Which visit a bill belongs to ───────────────────────────────────────── */
+
+/** patient_id → [{ d: 'YYYY-MM-DD', type }], oldest first. */
+function visitIndex(rows) {
+  const idx = new Map();
+  for (const r of rows || []) {
+    const k = String(r.patient_id);
+    if (!idx.has(k)) idx.set(k, []);
+    idx.get(k).push({ d: r.d, type: r.patient_type });
+  }
+  return idx;
+}
+
+/**
+ * The patient type of the patient's last visit ON OR BEFORE `day`, or null if
+ * they had none (bought before any confirmed visit, or the visit was deleted).
+ * Same-day visits count — the usual case is consult, then counter.
+ */
+function typeOn(idx, patientId, day) {
+  const visits = idx.get(String(patientId));
+  if (!visits || !day) return null;
+  for (let i = visits.length - 1; i >= 0; i--) {
+    if (visits[i].d <= day) return visits[i].type;
+  }
+  return null;
+}
+
+/** Read the visit history in chunks — an IN list of a month's patients. */
+async function readVisitHistory(run, patientIds, toDt) {
+  const ids = [...new Set(patientIds.filter((x) => x != null))];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 800) {
+    const rows = await run(VISIT_HISTORY_SQL, [ids.slice(i, i + 800), toDt]);
+    out.push(...rows);
+  }
+  return out;
+}
+
 /* ── Prescription conversion ─────────────────────────────────────────────── */
+
+/**
+ * What one eVital bill adds to the HEADLINE revenue: its amount in Cash, Card
+ * or Online — an "Other" mode is not counted, exactly as reduceEvital does.
+ */
+function countedAmount(invoice, updatedRaw) {
+  const total = Math.round(n0(invoice.total));
+  const keep = (mode, amt) => (normalizeMode(mode) === "Other" ? 0 : amt);
+  const txns = safeParse(updatedRaw)?.transaction_summary?.transactions ?? [];
+  if (txns.length === 1) return keep(txns[0].method, total);
+  if (txns.length > 1) {
+    return txns.reduce(
+      (a, t) => a + keep(t.method, Math.round(n0(t.amount))),
+      0,
+    );
+  }
+  return keep(invoice.payment_mode, total);
+}
 
 // The four buckets, in the order the section renders them. Anything the column
 // holds beyond these three named types lands in Other rather than being
@@ -164,6 +242,7 @@ const RX_TYPES = [
   { key: "new", label: "New", match: "New" },
   { key: "follow", label: "Follow-up", match: "Follow" },
   { key: "postop", label: "Post-op", match: "Postoperative" },
+  // Unrecognised types (e.g. MCDPA) AND bills with no visit on/before them.
   { key: "other", label: "Other", match: null },
 ];
 
@@ -203,11 +282,7 @@ const unitValue = (p) => {
  * Rows are PRESCRIPTIONS, not patients. A patient with two prescriptions in the
  * window counts twice, because each is a separate opportunity to dispense.
  */
-async function gatherPrescriptions(run, fromDt, toDt) {
-  const rows = await run(PRESCRIPTION_SQL, [fromDt, toDt]).catch((e) => {
-    console.error("overview/pharmacy: prescription query failed:", e.message);
-    return null;
-  });
+function gatherPrescriptions(rows, idx) {
   if (!rows) return null;
 
   const blank = () => ({
@@ -218,6 +293,7 @@ async function gatherPrescriptions(run, fromDt, toDt) {
     purchasedValue: 0,
     lostNotTaken: 0,
     lostPartial: 0,
+    revenue: 0, // headline-counted amount of TAKEN prescriptions only
   });
 
   const buckets = {};
@@ -243,7 +319,8 @@ async function gatherPrescriptions(run, fromDt, toDt) {
     if (!Array.isArray(prescription) || !prescription.length) continue;
 
     const items = invoice.items || [];
-    const b = buckets[rxBucket(row.patient_type)];
+    // The visit this prescription came from — see the header.
+    const b = buckets[rxBucket(typeOn(idx, row.patient_id, row.rx_day))];
 
     let prescribedValue = 0;
     let shortfallValue = 0;
@@ -274,6 +351,7 @@ async function gatherPrescriptions(run, fromDt, toDt) {
     } else {
       b.taken += 1;
       b.lostPartial += shortfallValue;
+      b.revenue += countedAmount(invoice, row.UpdatedInvoiceDetails);
     }
   }
 
@@ -291,6 +369,9 @@ async function gatherPrescriptions(run, fromDt, toDt) {
       lostNotTaken: Math.round(b.lostNotTaken),
       lostPartial: Math.round(b.lostPartial),
       lostTotal: Math.round(b.lostNotTaken + b.lostPartial),
+      revenue: Math.round(b.revenue),
+      // Per TAKEN prescription — the "patients" of the revenue table.
+      perPatient: b.taken > 0 ? Math.round(b.revenue / b.taken) : null,
     };
   }).filter((t) => t.total > 0);
 
@@ -305,6 +386,9 @@ async function gatherPrescriptions(run, fromDt, toDt) {
       lostNotTaken: sum("lostNotTaken"),
       lostPartial: sum("lostPartial"),
       lostTotal: sum("lostTotal"),
+      revenue: sum("revenue"),
+      perPatient:
+        sum("taken") > 0 ? Math.round(sum("revenue") / sum("taken")) : null,
       conversionPct:
         sum("total") > 0
           ? Math.round((sum("taken") / sum("total")) * 100)
@@ -402,6 +486,43 @@ function reduceEvital(rows, wantMedicines) {
   };
 }
 
+/* ── Revenue by patient type ─────────────────────────────────────────────── */
+
+/**
+ * The revenue table, read straight off the conversion buckets so it cannot
+ * disagree with them: PATIENTS here is TAKEN there, row for row.
+ *
+ *   patients    taken prescriptions of this type
+ *   revenue     their bills (headline modes only)
+ *   perPatient  revenue ÷ patients
+ *
+ * `withoutRx` is the rest of the eVital counter revenue — sales with no
+ * prescription or no patient. Rarely a few rupees negative when a
+ * prescription's created_at and its bill_date straddle the range edge;
+ * floored at 0 rather than shown as a negative sale.
+ */
+function revenueByType(prescriptions, evTotal, inhouse) {
+  if (!prescriptions) return null;
+  const byType = prescriptions.byType.map((t) => ({
+    key: t.key,
+    label: t.label,
+    patients: t.taken,
+    revenue: t.revenue,
+    perPatient: t.perPatient,
+  }));
+  const tt = prescriptions.totals;
+  return {
+    byType,
+    totals: {
+      patients: tt.taken,
+      revenue: tt.revenue,
+      perPatient: tt.perPatient,
+    },
+    withoutRx: Math.max(0, evTotal - tt.revenue),
+    inhouse,
+  };
+}
+
 /* ── No medicine prescribed ─────────────────────────────────────────────── */
 
 // Patients whose prescription in the range says no medicines were prescribed
@@ -450,21 +571,28 @@ async function gather(run, location, from, to, detailed) {
   const fromDt = `${from} 00:00:00`;
   const toDt = `${to} 23:59:59`;
 
-  const [hmsRows, evitalRows, prescriptions, noMedicinePatients] =
-    await Promise.all([
-      run(hmsSqlFor(location), [fromDt, toDt]).catch((e) => {
-        console.error(`overview/pharmacy: HMS query failed:`, e.message);
-        return null;
-      }),
-      run(EVITAL_SQL, [fromDt, toDt]).catch((e) => {
-        console.error(`overview/pharmacy: eVital query failed:`, e.message);
-        return [];
-      }),
-      // Current window only — nothing shows a prescription delta, and parsing
-      // every prescription twice would double the heaviest work in this model.
-      detailed ? gatherPrescriptions(run, fromDt, toDt) : Promise.resolve(null),
-      detailed ? countNoMedicine(run, from, to) : Promise.resolve(null),
-    ]);
+  const [hmsRows, evitalRows, rxRows, noMedicinePatients] = await Promise.all([
+    run(hmsSqlFor(location), [fromDt, toDt]).catch((e) => {
+      console.error(`overview/pharmacy: HMS query failed:`, e.message);
+      return null;
+    }),
+    run(EVITAL_SQL, [fromDt, toDt]).catch((e) => {
+      console.error(`overview/pharmacy: eVital query failed:`, e.message);
+      return [];
+    }),
+    // Current window only — nothing shows a prescription delta, and parsing
+    // every prescription twice would double the heaviest work in this model.
+    detailed
+      ? run(PRESCRIPTION_SQL, [fromDt, toDt]).catch((e) => {
+          console.error(
+            "overview/pharmacy: prescription query failed:",
+            e.message,
+          );
+          return null;
+        })
+      : Promise.resolve(null),
+    detailed ? countNoMedicine(run, from, to) : Promise.resolve(null),
+  ]);
 
   const hms = hmsRows?.[0] || {};
   const hmsCash = Math.round(n0(hms.cash));
@@ -475,6 +603,26 @@ async function gather(run, location, from, to, detailed) {
 
   const ev = reduceEvital(evitalRows || [], detailed);
   const evTotal = ev.modes.Cash + ev.modes.Card + ev.modes.Online;
+
+  // One visit lookup for both blocks, so conversion and revenue agree on who
+  // was New. A failed read hides both blocks rather than mislabel them.
+  let prescriptions = null;
+  let byType = null;
+  if (detailed) {
+    const history = await readVisitHistory(
+      run,
+      (rxRows || []).map((r) => r.patient_id),
+      toDt,
+    ).catch((e) => {
+      console.error("overview/pharmacy: visit history failed:", e.message);
+      return null;
+    });
+    if (history) {
+      const idx = visitIndex(history);
+      prescriptions = gatherPrescriptions(rxRows, idx);
+      byType = revenueByType(prescriptions, evTotal, hmsTotal);
+    }
+  }
 
   // getLocationSummary's assembly, exactly: Other is never added.
   const revenue = hmsTotal + evTotal;
@@ -506,6 +654,7 @@ async function gather(run, location, from, to, detailed) {
     ],
     medicines: ev.medicines,
     prescriptions,
+    revenueByType: byType,
     quality: {
       badJson: ev.badJson,
       splitBills: ev.splitBills,
@@ -572,6 +721,8 @@ async function getPharmacySection({ location, from, to, compare, preset }) {
     modes: current.modes,
     sources: current.sources,
     prescriptions: current.prescriptions,
+    // eVital revenue by the patient type of the visit each bill came from.
+    revenueByType: current.revenueByType,
     // Ten is the list, not a page of one. A month can produce hundreds of
     // distinct medicines, and the tail is reported as a count instead.
     medicines: current.medicines.slice(0, 10),

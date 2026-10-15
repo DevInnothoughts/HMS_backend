@@ -1,54 +1,56 @@
 /**
  * tmp_generateSurgeryReport_Jan_Jul.js  —  TEMPORARY / THROWAWAY SCRIPT
  * ---------------------------------------------------------------------------
- * One-off runner for the month-wise surgery report, widened to Jan–JULY:
+ * One-off runner for the month-wise surgery report (current year vs previous),
+ * NET OF INTERBRANCH. The shared model (src/models/surgeryRevenueReportModel)
+ * is NOT modified — the rule is applied entirely from this script.
  *
- *      Jan–Jul 2026   vs   Jan–Jul 2025
+ * ── Interbranch rule (src/models/utils/interbranch.js → countedSql) ─────────
+ * An interbranch surgery (OPD at source branch A, operated at branch B) has the
+ * SAME invoice in both branch DBs. It counts ONLY at the SOURCE branch:
+ *   source copy    (interbranch_id <> 0, patient_location = 'B') → counted
+ *   operating copy (interbranch_id = 0/NULL, patient_location = 'A') → excluded
+ *   patient_location 'DP Road' (always an operating branch) → always counted
  *
- * Same workbook layout as Monthwise_Surgeries_2026_vs_2025_01-06.xlsx, now with
- * the INTERBRANCH rule applied (options.interbranch = true):
+ * ── How it is applied ───────────────────────────────────────────────────────
+ * 1. NET: getConnectionByLocation is wrapped for this process only, so the
+ *    model's invoice query gets `AND <countedSql>` appended. Every model figure
+ *    (month, type, location, sub-type) is then net — operating-branch copies
+ *    never reach it. If the model's invoice SQL ever changes shape, the script
+ *    STOPS instead of silently producing gross numbers.
+ * 2. EXCLUDED: one query per branch per year lists what the rule left out,
+ *    per month, on the model's own definition (one patient-month = one surgery):
+ *      excluded surgeries = patient-months whose invoices are ALL excluded
+ *      excluded revenue   = SUM(totalamt) of the excluded invoices
+ *    So, per branch per month, gross = net + excluded EXACTLY.
  *
- *   An interbranch surgery has the same invoice in two branch DBs; it belongs
- *   to the SOURCE branch. The operating branch's copy is excluded — the same
- *   rule the app uses (src/models/utils/interbranch.js; DP Road always
- *   counted). Every surgery count and revenue figure is therefore NET, and an
- *   interbranch surgery is counted once across the group instead of twice.
+ * ── Workbook (same layout as the gross file, plus) ──────────────────────────
+ *   Monthly Totals / Location Summary   + IB excl. surgeries & ₹, both years
+ *   By Surgery Type / Loc-Type sheets   net (excluded cases carry no type)
+ *   Interbranch <year> (×2, new)        branch × month: excluded # and ₹
+ *   Interbranch Warnings (only if any)  branches whose excluded lookup failed
  *
- * Where the difference is shown:
- *   Monthly Totals / Location Summary   + IB excl. surgeries & revenue, both years
- *   Interbranch <year> (×2, new)        location × month: excluded # and ₹
- *   By Surgery Type / Loc-Type sheets   net only (excluded cases carry no type)
- *   Gross = net + excluded, exactly, for surgeries and revenue.
- *
- * ── Place this file in temp/ ─────────────────────────────────────────────────
- * It requires ../src/models/surgeryRevenueReportModel (and, through it,
- * src/models/utils/interbranch.js and databaseUtils).
- *
- * ── Run ─────────────────────────────────────────────────────────────────────
+ * ── Run (from the backend root) ─────────────────────────────────────────────
  *   node temp/tmp_generateSurgeryReport_Jan_Jul.js
- *
- *   # override branches (comma-separated, must match getConnectionByLocation keys)
- *   node temp/tmp_generateSurgeryReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi"
- *
- *   # override the window too:  <locations> <year> <startMonth> <endMonth>
- *   node temp/tmp_generateSurgeryReport_Jan_Jul.js "Andheri,Thane" 2026 1 7
+ *   node temp/tmp_generateSurgeryReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi,Kalyan" 2026 1 9
+ *        args: <locations> <year> <startMonth> <endMonth>
+ *        (location strings must match getConnectionByLocation keys)
  *
  * ── Output ──────────────────────────────────────────────────────────────────
- *   src/report/Monthwise_Surgeries_2026_vs_2025_01-07_IPDnet.xlsx
- *   (_IPDnet marks the interbranch-adjusted file, so it never overwrites the
- *   earlier gross workbook)
+ *   src/report/Monthwise_Surgeries_<Y>_vs_<P>_<MM>-<MM>_IPDnet.xlsx
+ *   (_IPDnet marks the interbranch-adjusted file; it never overwrites a gross one)
  *
  * DELETE THIS FILE once the workbook has been generated.
  * ---------------------------------------------------------------------------
  */
 
-const {
-  generateMonthwiseSurgeryExcel,
-} = require("../src/models/surgeryRevenueReportModel");
+const path = require("path");
+const xlsx = require("xlsx");
+const databaseUtils = require("../databaseUtils");
+const { countedSql } = require("../src/models/utils/interbranch");
 
 /* ── Config ──────────────────────────────────────────────────────────────── */
 
-// Same four branches as the Jan–Jun workbook, so the two files are comparable.
 // Keep the strings exactly as getConnectionByLocation expects them.
 const DEFAULT_LOCATIONS = [
   "HSR",
@@ -73,18 +75,344 @@ const OPTIONS = {
   year: Number(process.argv[3]) || 2026,
   previousYear: Number(process.argv[3]) ? Number(process.argv[3]) - 1 : 2025,
   startMonth: Number(process.argv[4]) || 1,
-  endMonth: Number(process.argv[5]) || 7, // ← July (was 6)
-  interbranch: true, // exclude operating-branch copies; report them apart
+  endMonth: Number(process.argv[5]) || 9,
 };
+
+/* ── 1. NET: inject the interbranch rule into the model's invoice query ──── */
+
+// Matches the model's INVOICE_SQL WHERE clause (surgeryRevenueReportModel.js).
+const INVOICE_WHERE_RE =
+  /FROM\s+invoice\s+WHERE\s+creation_date\s*>=\s*\?\s+AND\s+creation_date\s*<=\s*\?\s+AND\s+is_deleted\s*!=\s*1/i;
+
+let invoiceQueriesPatched = 0;
+
+const origGetConnection = databaseUtils.getConnectionByLocation;
+databaseUtils.getConnectionByLocation = (loc) => {
+  const res = origGetConnection(loc);
+  if (!res || !res.connection) return res;
+  const conn = res.connection;
+  const wrapped = {
+    query(sql, params, cb) {
+      if (typeof sql === "string" && /FROM\s+invoice\b/i.test(sql)) {
+        if (!INVOICE_WHERE_RE.test(sql)) {
+          const err = new Error(
+            "Interbranch patch: the model's invoice SQL changed shape — " +
+              "update INVOICE_WHERE_RE in this script (refusing to report gross).",
+          );
+          return cb(err);
+        }
+        sql = sql.replace(
+          INVOICE_WHERE_RE,
+          (m) => `${m}\n    AND (${countedSql("invoice")})`,
+        );
+        invoiceQueriesPatched += 1;
+      }
+      return conn.query(sql, params, cb);
+    },
+  };
+  return { ...res, connection: wrapped };
+};
+
+// Required AFTER the patch (the model looks the helper up at call time anyway).
+const {
+  getMonthwiseSurgeryReport,
+  buildMonthwiseSurgeryWorkbook,
+} = require("../src/models/surgeryRevenueReportModel");
+
+/* ── 2. EXCLUDED: what the rule left out, per branch per month ───────────── */
+
+const IB_SQL = `
+  SELECT x.mon,
+         SUM(CASE WHEN x.cnt = 0 THEN 1 ELSE 0 END) AS surgeries,
+         COALESCE(SUM(x.ibAmt), 0)                  AS revenue
+    FROM (
+      SELECT i.patient_id,
+             MONTH(i.creation_date) AS mon,
+             SUM(CASE WHEN ${countedSql("i")} THEN 1 ELSE 0 END)                       AS cnt,
+             SUM(CASE WHEN ${countedSql("i")} THEN 0 ELSE 1 END)                       AS ibCnt,
+             SUM(CASE WHEN ${countedSql("i")} THEN 0 ELSE COALESCE(i.totalamt, 0) END) AS ibAmt
+        FROM invoice i
+       WHERE i.creation_date >= ? AND i.creation_date <= ?
+         AND i.is_deleted != 1
+       GROUP BY i.patient_id, MONTH(i.creation_date)
+    ) x
+   WHERE x.ibCnt > 0
+   GROUP BY x.mon
+`;
+
+const pad2 = (n) => String(n).padStart(2, "0");
+const round2 = (n) =>
+  Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
+
+function windowBounds(year, startMonth, endMonth) {
+  const endDay = new Date(year, endMonth, 0).getDate();
+  return [
+    `${year}-${pad2(startMonth)}-01 00:00:00`,
+    `${year}-${pad2(endMonth)}-${pad2(endDay)} 23:59:59`,
+  ];
+}
+
+/** → { byLoc: { [loc]: { [year]: { [month]: {surgeries, revenue} } } }, failures } */
+async function getInterbranchExcluded(report) {
+  const { year, previousYear, startMonth, endMonth } = report.period;
+  const skip = new Set(report.locationsFailed.map((f) => f.location));
+  const byLoc = {};
+  const failures = [];
+
+  await Promise.all(
+    report.locationsRequested.map(async (loc) => {
+      if (skip.has(loc)) return;
+      byLoc[loc] = {};
+      try {
+        const { connection } = origGetConnection(loc);
+        if (!connection) throw new Error("invalid location");
+        for (const yr of [year, previousYear]) {
+          const rows = await new Promise((res, rej) =>
+            connection.query(
+              IB_SQL,
+              windowBounds(yr, startMonth, endMonth),
+              (e, r) => (e ? rej(e) : res(r)),
+            ),
+          );
+          byLoc[loc][yr] = {};
+          for (const r of rows)
+            byLoc[loc][yr][Number(r.mon)] = {
+              surgeries: Number(r.surgeries) || 0,
+              revenue: Number(r.revenue) || 0,
+            };
+        }
+      } catch (e) {
+        delete byLoc[loc];
+        failures.push({ location: loc, error: e?.message || String(e) });
+      }
+    }),
+  );
+  return { byLoc, failures };
+}
+
+/* ── Attach excluded figures to the (already net) report ─────────────────── */
+
+function applyInterbranch(report, ib) {
+  const { year, previousYear, monthList } = report.period;
+  const at = (loc, yr, m) =>
+    ib.byLoc[loc]?.[yr]?.[m] || { surgeries: 0, revenue: 0 };
+  const sum = (list) =>
+    list.reduce(
+      (a, v) => ({
+        surgeries: a.surgeries + v.surgeries,
+        revenue: round2(a.revenue + v.revenue),
+      }),
+      { surgeries: 0, revenue: 0 },
+    );
+  const locs = report.byLocation.map((l) => l.location);
+
+  report.months.forEach((mm) => {
+    mm.current.interbranch = sum(locs.map((l) => at(l, year, mm.month)));
+    mm.previous.interbranch = sum(
+      locs.map((l) => at(l, previousYear, mm.month)),
+    );
+  });
+  report.totals.current.interbranch = sum(
+    report.months.map((m) => m.current.interbranch),
+  );
+  report.totals.previous.interbranch = sum(
+    report.months.map((m) => m.previous.interbranch),
+  );
+
+  report.byLocation.forEach((l) => {
+    l.ibMonthlyCurrent = monthList.map((m) => at(l.location, year, m));
+    l.ibMonthlyPrevious = monthList.map((m) => at(l.location, previousYear, m));
+    l.current.interbranch = sum(l.ibMonthlyCurrent);
+    l.previous.interbranch = sum(l.ibMonthlyPrevious);
+  });
+
+  report.definition +=
+    " NET OF INTERBRANCH: a surgery operated at one branch for another counts only " +
+    "at its SOURCE branch; the operating branch's copy is excluded and listed " +
+    "separately (DP Road always counted). Gross = net + IB excl.";
+  report.interbranch = ib;
+  return report;
+}
+
+/* ── Workbook additions ──────────────────────────────────────────────────── */
+
+const NUM_FMT = '#,##0;(#,##0);"-"';
+
+// Adds 4 IB columns (I–L) to a model comparison sheet. Data rows follow `rows`
+// in order (as the model wrote them), then the total row.
+function addIbColumns(ws, rows, Y, P) {
+  const r0 = 3; // first data row (0-based) — title, note/blank, header
+  const ibs = rows.map((r) => [
+    r.current.interbranch.surgeries,
+    r.previous.interbranch.surgeries,
+    r.current.interbranch.revenue,
+    r.previous.interbranch.revenue,
+  ]);
+  const tot = ibs.reduce(
+    (a, v) => a.map((x, i) => round2(x + v[i])),
+    [0, 0, 0, 0],
+  );
+  xlsx.utils.sheet_add_aoa(
+    ws,
+    [
+      [
+        `IB excl. Surgeries ${Y}`,
+        `IB excl. Surgeries ${P}`,
+        `IB excl. Revenue (₹) ${Y}`,
+        `IB excl. Revenue (₹) ${P}`,
+      ],
+      ...ibs,
+      tot,
+    ],
+    { origin: { r: 2, c: 8 } },
+  );
+  for (let r = r0; r <= r0 + rows.length; r++)
+    for (let c = 8; c <= 11; c++) {
+      const cell = ws[xlsx.utils.encode_cell({ r, c })];
+      if (cell && cell.t === "n") cell.z = NUM_FMT;
+    }
+  ws["!cols"] = [
+    ...(ws["!cols"] || []).slice(0, 8),
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 17 },
+    { wch: 17 },
+  ];
+  markNet(ws, 11);
+}
+
+// Title → "… — net of interbranch", note in row 2, title merge widened.
+function markNet(ws, lastCol, note = NOTE_IB) {
+  const t = ws.A1;
+  if (t && typeof t.v === "string" && !t.v.includes("net of interbranch")) {
+    t.v = `${t.v} — net of interbranch`;
+    delete t.w;
+  }
+  xlsx.utils.sheet_add_aoa(ws, [[note]], { origin: "A2" });
+  ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } }];
+}
+
+const NOTE_IB =
+  "Net of interbranch: surgeries operated here for another branch are excluded " +
+  "(counted at their source branch). IB excl. columns show what was left out; gross = net + IB excl.";
+const NOTE_NET =
+  "Net of interbranch: surgeries operated here for another branch are excluded " +
+  "(counted at their source branch).";
+
+function buildInterbranchSheet(report, which, yr) {
+  const monthNames = report.period.monthNames;
+  const key = which === "current" ? "ibMonthlyCurrent" : "ibMonthlyPrevious";
+  const failed = new Set(report.interbranch.failures.map((f) => f.location));
+  const header = [
+    "Location",
+    ...monthNames.map((m) => `${m} (#)`),
+    "Total (#)",
+    ...monthNames.map((m) => `${m} (₹)`),
+    "Total (₹)",
+  ];
+  const aoa = [
+    [
+      `Interbranch surgeries EXCLUDED (operated here, counted at source branch) — ${yr} (${report.period.months})`,
+    ],
+    [],
+    header,
+  ];
+  const n = monthNames.length;
+  const colCnt = new Array(n).fill(0);
+  const colAmt = new Array(n).fill(0);
+  let gCnt = 0;
+  let gAmt = 0;
+  report.byLocation.forEach((l) => {
+    const cnts = l[key].map((v) => v.surgeries);
+    const amts = l[key].map((v) => v.revenue);
+    const tc = cnts.reduce((a, b) => a + b, 0);
+    const ta = round2(amts.reduce((a, b) => a + b, 0));
+    cnts.forEach((v, i) => (colCnt[i] += v));
+    amts.forEach((v, i) => (colAmt[i] += v));
+    gCnt += tc;
+    gAmt += ta;
+    const label = failed.has(l.location)
+      ? `${l.location} (lookup failed)`
+      : l.location;
+    aoa.push([label, ...cnts, tc, ...amts, ta]);
+  });
+  aoa.push([
+    "Grand Total",
+    ...colCnt,
+    gCnt,
+    ...colAmt.map(round2),
+    round2(gAmt),
+  ]);
+
+  const ws = xlsx.utils.aoa_to_sheet(aoa);
+  ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: header.length - 1 } }];
+  ws["!cols"] = [
+    { wch: 22 },
+    ...monthNames.map(() => ({ wch: 10 })),
+    { wch: 10 },
+    ...monthNames.map(() => ({ wch: 13 })),
+    { wch: 15 },
+  ];
+  for (let r = 3; r <= 3 + report.byLocation.length; r++)
+    for (let c = 1; c < header.length; c++) {
+      const cell = ws[xlsx.utils.encode_cell({ r, c })];
+      if (cell && cell.t === "n") cell.z = NUM_FMT;
+    }
+  return ws;
+}
+
+function buildWorkbookIB(report) {
+  const { year, previousYear } = report.period;
+  const wb = buildMonthwiseSurgeryWorkbook(report); // model layout, net figures
+
+  addIbColumns(wb.Sheets["Monthly Totals"], report.months, year, previousYear);
+  addIbColumns(
+    wb.Sheets["Location Summary"],
+    report.byLocation,
+    year,
+    previousYear,
+  );
+  markNet(wb.Sheets["By Surgery Type"], 7, NOTE_NET);
+  for (const name of wb.SheetNames)
+    if (/^(Surg|Rev) by Loc-/.test(name)) {
+      const ws = wb.Sheets[name];
+      const lastCol = xlsx.utils.decode_range(ws["!ref"]).e.c;
+      markNet(ws, lastCol, NOTE_NET);
+    }
+
+  xlsx.utils.book_append_sheet(
+    wb,
+    buildInterbranchSheet(report, "current", year),
+    `Interbranch ${year}`,
+  );
+  xlsx.utils.book_append_sheet(
+    wb,
+    buildInterbranchSheet(report, "previous", previousYear),
+    `Interbranch ${previousYear}`,
+  );
+
+  if (report.interbranch.failures.length) {
+    const ws = xlsx.utils.aoa_to_sheet([
+      [
+        "Excluded-interbranch lookup failed — net figures are still correct; " +
+          "only the IB excl. columns for these branches show 0",
+      ],
+      ["Location", "Error"],
+      ...report.interbranch.failures.map((f) => [f.location, f.error]),
+    ]);
+    ws["!cols"] = [{ wch: 24 }, { wch: 60 }];
+    xlsx.utils.book_append_sheet(wb, ws, "Interbranch Warnings");
+  }
+  return wb;
+}
 
 /* ── Run ─────────────────────────────────────────────────────────────────── */
 
 (async () => {
   const t0 = Date.now();
-
   console.log("──────────────────────────────────────────────────────────");
   console.log(
-    "Month-wise Surgery Report — net of interbranch (temporary runner)",
+    "Month-wise Surgery Report — NET of interbranch (temporary runner)",
   );
   console.log(
     `Window   : ${OPTIONS.startMonth}–${OPTIONS.endMonth} | ` +
@@ -94,59 +422,71 @@ const OPTIONS = {
   console.log("──────────────────────────────────────────────────────────");
 
   try {
-    const result = await generateMonthwiseSurgeryExcel(LOCATIONS, OPTIONS);
-    const { report } = result;
-    const { current, previous } = report.totals;
-
-    console.log(`\n✅ Workbook written: ${result.filePath}`);
-    console.log(
-      `   Same layout as the Jan–Jun file, net of interbranch, plus ` +
-        `IB columns and 'Interbranch ${report.period.year}/${report.period.previousYear}' sheets.`,
-    );
-
-    // Quick sanity print so you can eyeball the numbers before mailing it out.
-    console.log(
-      `\nTotals (${report.period.months}) ` +
-        `— ${report.period.year} vs ${report.period.previousYear}:`,
-    );
-    const inr = (n) => Math.round(Number(n) || 0).toLocaleString("en-IN");
-    const ci = current.interbranch || { surgeries: 0, revenue: 0 };
-    const pi = previous.interbranch || { surgeries: 0, revenue: 0 };
-    console.log(
-      `   Surgeries (net) : ${current.surgeries}  vs  ${previous.surgeries}` +
-        `   (Δ ${current.surgeries - previous.surgeries})`,
-    );
-    console.log(
-      `   Revenue ₹ (net) : ${inr(current.revenue)}  vs  ${inr(previous.revenue)}`,
-    );
-    console.log(
-      `   Interbranch excl: ${ci.surgeries} SX · ₹ ${inr(ci.revenue)}` +
-        `  vs  ${pi.surgeries} SX · ₹ ${inr(pi.revenue)}`,
-    );
-    console.log(
-      `   [gross would be ${current.surgeries + ci.surgeries} SX · ₹ ${inr(current.revenue + ci.revenue)}` +
-        `  vs  ${previous.surgeries + pi.surgeries} SX · ₹ ${inr(previous.revenue + pi.revenue)}]`,
-    );
-
-    console.log("\nMonth-wise surgeries (net)   [interbranch excluded]:");
-    report.months.forEach((m) => {
-      console.log(
-        `   ${m.monthName.padEnd(10)} ${String(m.current.surgeries).padStart(5)}` +
-          `  vs ${String(m.previous.surgeries).padStart(5)}` +
-          `   [${m.current.interbranch?.surgeries || 0} vs ${m.previous.interbranch?.surgeries || 0}]`,
+    // 1) Net report (model + injected rule)
+    const report = await getMonthwiseSurgeryReport(LOCATIONS, OPTIONS);
+    const ok = report.locationsRequested.length - report.locationsFailed.length;
+    if (ok > 0 && invoiceQueriesPatched === 0)
+      throw new Error(
+        "Interbranch patch was never applied — refusing to write a gross workbook.",
       );
-    });
 
-    if (report.locationsFailed?.length) {
+    // 2) Excluded interbranch, same windows
+    const ib = await getInterbranchExcluded(report);
+    applyInterbranch(report, ib);
+
+    // 3) Workbook
+    const wb = buildWorkbookIB(report);
+    const { year, previousYear, startMonth, endMonth } = report.period;
+    const fileName = `Monthwise_Surgeries_${year}_vs_${previousYear}_${pad2(startMonth)}-${pad2(endMonth)}_IPDnet.xlsx`;
+    const filePath = path.join(__dirname, "..", "src", "report", fileName);
+    xlsx.writeFile(wb, filePath);
+    console.log(`\n✅ Workbook written: ${filePath}`);
+
+    // Sanity print
+    const inr = (n) => Math.round(Number(n) || 0).toLocaleString("en-IN");
+    const { current: c, previous: p } = report.totals;
+    console.log(
+      `\nTotals (${report.period.months}) — ${year} vs ${previousYear}:`,
+    );
+    console.log(
+      `   Surgeries (net) : ${c.surgeries}  vs  ${p.surgeries}   (Δ ${c.surgeries - p.surgeries})`,
+    );
+    console.log(
+      `   Revenue ₹ (net) : ${inr(c.revenue)}  vs  ${inr(p.revenue)}`,
+    );
+    console.log(
+      `   Interbranch excl: ${c.interbranch.surgeries} SX · ₹ ${inr(c.interbranch.revenue)}` +
+        `  vs  ${p.interbranch.surgeries} SX · ₹ ${inr(p.interbranch.revenue)}`,
+    );
+    console.log(
+      `   [gross = ${c.surgeries + c.interbranch.surgeries} SX · ₹ ${inr(c.revenue + c.interbranch.revenue)}` +
+        `  vs  ${p.surgeries + p.interbranch.surgeries} SX · ₹ ${inr(p.revenue + p.interbranch.revenue)}]`,
+    );
+
+    console.log("\nBy location (net)   [interbranch excluded]:");
+    report.byLocation.forEach((l) =>
+      console.log(
+        `   ${l.location.padEnd(16)} ${String(l.current.surgeries).padStart(5)}` +
+          `  vs ${String(l.previous.surgeries).padStart(5)}` +
+          `   [${l.current.interbranch.surgeries} vs ${l.previous.interbranch.surgeries}]`,
+      ),
+    );
+
+    if (report.locationsFailed.length) {
       console.warn("\n⚠️  Skipped branches (see 'Skipped Locations' sheet):");
       report.locationsFailed.forEach((f) =>
         console.warn(`   • ${f.location}: ${f.error}`),
       );
     }
+    if (ib.failures.length) {
+      console.warn("\n⚠️  Excluded-interbranch lookup failed (IB columns 0):");
+      ib.failures.forEach((f) =>
+        console.warn(`   • ${f.location}: ${f.error}`),
+      );
+    }
 
     console.log(`\nDone in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-    // mysql pools keep the event loop alive — exit explicitly.
-    process.exit(0);
+    process.exit(0); // mysql pools keep the event loop alive
   } catch (err) {
     console.error("\n❌ Report generation failed:", err?.message || err);
     console.error(err?.stack || "");
