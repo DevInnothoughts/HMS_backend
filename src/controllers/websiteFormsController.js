@@ -5,6 +5,7 @@
 //
 //   POST https://<backend-host>/hms/websiteForms/career    ← career-mail.php
 //   POST https://<backend-host>/hms/websiteForms/campaign  ← campaign-mail.php
+//   POST https://<backend-host>/hms/websiteForms/contact   ← contact-mail.php
 //   POST https://<backend-host>/hms/websiteForms/amp       ← mailchimp-post.php
 //
 // Mounted in app.js:
@@ -14,7 +15,7 @@
 //                  mail HR with the resume (PDF/DOC/DOCX) attached. The
 //                  resume is never saved on the server.
 //                  See src/models/careerLeadModel.js.
-// campaign / amp:  validate → INSERT into hhc_appointments.appointments → mail
+// campaign / contact / amp:  validate → INSERT into hhc_appointments.appointments → mail
 //                  the location (TO admin inbox, CC that location's list).
 //                  See src/models/websiteEnquiryModel.js.
 // Recipients for all three: src/config/websiteFormRecipients.js.
@@ -23,6 +24,8 @@
 //   career:   fname, lname, phone_no, address, city, zipcode, email_id,
 //             current_cmp, feedback, file (resume) — the form must be
 //             enctype="multipart/form-data", as it already is for the PHP
+//   contact:  cyourname, cyouremail, cyourphone, cselected_area, cvisitingfor,
+//             cyourmessage, subjectText, cutmsource, currenturl
 //   campaign: yourname, youremail, yourphone, selected_area, yourmessage,
 //             subjectText, utmsource            (+ Referer header → pageurl)
 //   amp:      name, email, phoneno, selected_area, message, pagesubject
@@ -31,14 +34,14 @@
 // or JSON.
 //
 // ── Replies ─────────────────────────────────────────────────────────────────
-// career and campaign are normal <form method="post"> submissions, so — exactly
+// career, campaign and contact are normal <form method="post"> submissions, so — exactly
 // like the PHP — they answer with a tiny HTML page (Meta pixel + alert +
 // redirect):
 //   career  success → Lead pixel + "Your message has been sent" → /career-form/
 //           errors  → same alerts as the PHP ("Please fill the required
 //                     fields", "Only PDF, DOC and DOCX files are allowed.")
 //                     → /career-form/
-//   campaign:
+//   campaign / contact:
 //   success → per location (see `pixel` in the recipients config):
 //               PageView pixel 913144286745452 → /thank-you/      or
 //               Lead pixel 2199419837014290 + "Thank you…" alert → /thank-you/
@@ -47,8 +50,9 @@
 // amp answers JSON with the AMP CORS headers and AMP-Redirect-To
 // /amp/thank-you/, or 400 {message} on bad input — as the PHP did.
 //
-// ── Captcha (campaign) ──────────────────────────────────────────────────────
-// campaign-mail.php compared $_POST["captcha"] with $_SESSION["code"], a PHP
+// ── Captcha (campaign, contact) ─────────────────────────────────────────────
+// campaign-mail.php and contact-mail.php compared the posted captcha with
+// $_SESSION["code"], a PHP
 // session on the website's domain. This backend can't see that session, so the
 // check is replaced by:
 //   • a per-IP rate limit (5 submissions / 10 min per form), and
@@ -66,6 +70,7 @@ const {
 } = require("../models/careerLeadModel");
 const {
   submitCampaignEnquiry,
+  submitContactEnquiry,
   submitAmpEnquiry,
 } = require("../models/websiteEnquiryModel");
 const { SITE } = require("../models/websiteFormUtils");
@@ -217,40 +222,46 @@ router.post(
   },
 );
 
-/* ── campaign-mail.php ───────────────────────────────────────────────────── */
+/* ── campaign-mail.php & contact-mail.php ────────────────────────────────── */
+// Both forms behave identically (same replies, same pixels per location); they
+// differ only in field names and recipient lists, handled in the model.
 
-const campaignError = (res) =>
+const enquiryError = (res) =>
   replyPage(res, { alert: "Something went wrong...", redirect: SITE });
 
-router.post(
-  "/campaign",
-  urlencoded,
-  multipart((res) => campaignError(res)),
-  async (req, res) => {
-    try {
-      if (isBot(req.body)) return replyPage(res, { redirect: THANK_YOU });
-      if (rateLimited("campaign", req)) return campaignError(res);
+function enquiryRoute(form, submit) {
+  return [
+    urlencoded,
+    multipart((res) => enquiryError(res)),
+    async (req, res) => {
+      try {
+        if (isBot(req.body)) return replyPage(res, { redirect: THANK_YOU });
+        if (rateLimited(form, req)) return enquiryError(res);
 
-      const result = await submitCampaignEnquiry(req.body || {}, {
-        referer: req.get("referer"),
-        query: req.query,
-      });
-      if (result.status !== "success") return campaignError(res);
+        const result = await submit(req.body || {}, {
+          referer: req.get("referer"),
+          query: req.query,
+        });
+        if (result.status !== "success") return enquiryError(res);
 
-      return result.pixel === "lead"
-        ? replyPage(res, {
-            pixel: "lead",
-            alert:
-              "Thank you. Your request for a consultation at Healing Hands Clinic has been received by us",
-            redirect: THANK_YOU,
-          })
-        : replyPage(res, { pixel: "pageview", redirect: THANK_YOU });
-    } catch (e) {
-      console.error("campaignEnquiry: unexpected error —", e);
-      return campaignError(res);
-    }
-  },
-);
+        return result.pixel === "lead"
+          ? replyPage(res, {
+              pixel: "lead",
+              alert:
+                "Thank you. Your request for a consultation at Healing Hands Clinic has been received by us",
+              redirect: THANK_YOU,
+            })
+          : replyPage(res, { pixel: "pageview", redirect: THANK_YOU });
+      } catch (e) {
+        console.error(`${form}Enquiry: unexpected error —`, e);
+        return enquiryError(res);
+      }
+    },
+  ];
+}
+
+router.post("/campaign", ...enquiryRoute("campaign", submitCampaignEnquiry));
+router.post("/contact", ...enquiryRoute("contact", submitContactEnquiry));
 
 /* ── mailchimp-post.php (AMP) ────────────────────────────────────────────── */
 

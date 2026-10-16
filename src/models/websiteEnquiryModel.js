@@ -2,9 +2,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Website enquiry forms — Node ports of:
 //   campaign-mail.php   → submitCampaignEnquiry()  (landing-page form)
+//   contact-mail.php    → submitContactEnquiry()   (contact-page form)
 //   mailchimp-post.php  → submitAmpEnquiry()       (AMP-page form)
 //
-// Both do the same thing:
+// All three do the same thing:
 //   1. Validate the fields
 //   2. INSERT into hhc_appointments.appointments
 //        (name, email_id, phoneno, selected_area, message, date, pageurl, utmsource)
@@ -23,6 +24,7 @@
 
 const {
   CAMPAIGN_ROUTES,
+  CONTACT_ROUTES,
   AMP_ROUTES,
 } = require("../config/websiteFormRecipients");
 const {
@@ -46,6 +48,9 @@ function mailHtml(f) {
   msg += `Email ID: ${esc(f.email)}<br>`;
   msg += `Contact No. : ${esc(f.phone)}<br>`;
   msg += `For Location. : ${esc(f.mailArea)}<br>`;
+  if (f.visitingFor !== undefined) {
+    msg += `Visiting For. : ${esc(f.visitingFor)}<br>`; // contact form only
+  }
   msg += `Message. : ${esc(f.message)}<br>`;
   msg += `Page Url: ${esc(f.pageurl)}<br>`;
   msg += `Lead Source : ${esc(f.utmsource)}<br>`;
@@ -134,6 +139,71 @@ async function submitCampaignEnquiry(body = {}, meta = {}) {
   return { status: "success", pixel: route ? route.pixel : "pageview" };
 }
 
+/* ── contact-mail.php ────────────────────────────────────────────────────── */
+
+/**
+ * Same as campaign-mail.php, with c-prefixed field names and one extra
+ * required field (cvisitingfor), which goes in the mail only — the
+ * appointments table has no column for it, exactly as in the PHP.
+ *
+ * @param {object} body  posted fields: cyourname, cyouremail, cyourphone,
+ *                       cselected_area, cvisitingfor, cyourmessage,
+ *                       subjectText, cutmsource, currenturl
+ * @param {{referer?:string, query?:object}} meta
+ * @returns {Promise<{status:'success'|'error', pixel?:'pageview'|'lead'}>}
+ *          never rejects
+ */
+async function submitContactEnquiry(body = {}, meta = {}) {
+  const query = meta.query || {};
+  const f = {
+    name: str(body.cyourname),
+    email: str(body.cyouremail),
+    phone: str(body.cyourphone),
+    area: str(body.cselected_area),
+    visitingFor: str(body.cvisitingfor),
+    message: str(body.cyourmessage),
+    subjectText: str(body.subjectText),
+    // PHP $_REQUEST['cutmsource'] — POST body or query string
+    utmsource: str(body.cutmsource || query.cutmsource),
+    // Page URL: posted `currenturl` (as on the campaign form), else Referer
+    pageurl: str(body.currenturl || meta.referer),
+  };
+  f.mailArea = f.area;
+
+  if (
+    !f.name ||
+    !EMAIL_RE.test(f.email) ||
+    !f.phone ||
+    !f.area ||
+    !f.visitingFor ||
+    !f.message
+  ) {
+    return { status: "error" };
+  }
+
+  await saveRow("contactEnquiry", f);
+
+  const route = CONTACT_ROUTES[f.area];
+  if (!route) {
+    console.warn(
+      `contactEnquiry: location "${f.area}" has no recipient list — sent to admin only. ` +
+        "Add it to CONTACT_ROUTES in src/config/websiteFormRecipients.js.",
+    );
+  }
+  const subject = route
+    ? route.fixedSubject || `${route.subject}${f.subjectText}`
+    : `${f.area} - ${f.subjectText}`;
+
+  await sendLeadMail({
+    tag: "contactEnquiry",
+    cc: route ? route.recipients : [],
+    subject,
+    html: mailHtml(f),
+  });
+
+  return { status: "success", pixel: route ? route.pixel : "pageview" };
+}
+
 /* ── mailchimp-post.php (AMP) ────────────────────────────────────────────── */
 
 /**
@@ -189,4 +259,9 @@ async function submitAmpEnquiry(body = {}, meta = {}) {
   return { status: "success", name: f.name, email: f.email };
 }
 
-module.exports = { submitCampaignEnquiry, submitAmpEnquiry, utmFromUrl };
+module.exports = {
+  submitCampaignEnquiry,
+  submitContactEnquiry,
+  submitAmpEnquiry,
+  utmFromUrl,
+};

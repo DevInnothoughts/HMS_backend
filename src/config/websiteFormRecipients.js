@@ -2,9 +2,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Website lead forms — who gets the mail for each form / location.
 //
-// Ported 1:1 from three PHP files:
+// Ported 1:1 from four PHP files:
 //   career-mail.php      → CAREER_MAIL
 //   campaign-mail.php    → CAMPAIGN_ROUTES   (landing-page enquiry form)
+//   contact-mail.php     → CONTACT_ROUTES    (contact-page enquiry form)
 //   mailchimp-post.php   → AMP_ROUTES        (AMP pages' enquiry form)
 //
 // The KEY is the exact `selected_area` value the website form posts.
@@ -338,6 +339,21 @@ const CAMPAIGN_ROUTES = {
   Dubai: { subject: "Dubai - ", pixel: PV, recipients: [ROSHAN, PANKAJ] },
 };
 
+/* ── contact-mail.php ────────────────────────────────────────────────────── */
+// contact-mail.php now uses the SAME subjects, pixels and recipient lists as
+// campaign-mail.php for every location, with one exception: Thane also CCs
+// ksayali200@gmail.com. So CONTACT_ROUTES reuses CAMPAIGN_ROUTES and only
+// overrides Thane — a recipient change made in CAMPAIGN_ROUTES applies to
+// both forms. To make the contact form differ for a location, add an override
+// here the same way.
+const CONTACT_ROUTES = {
+  ...CAMPAIGN_ROUTES,
+  "Thane - Kapurbawdi": {
+    ...CAMPAIGN_ROUTES["Thane - Kapurbawdi"],
+    recipients: [B.thane, MAHIMA],
+  },
+};
+
 /* ── mailchimp-post.php (AMP form) ───────────────────────────────────────── */
 // subject          → full subject line
 // pageSubjectLabel → when set and the form posts `pagesubject`, the subject
@@ -527,4 +543,4 @@ const AMP_ROUTES = {
   Dubai: { subject: "Dubai - AMP Enquiry", recipients: [ROSHAN, PANKAJ] },
 };
 
-module.exports = { CAREER_MAIL, CAMPAIGN_ROUTES, AMP_ROUTES };
+module.exports = { CAREER_MAIL, CAMPAIGN_ROUTES, CONTACT_ROUTES, AMP_ROUTES };
