@@ -1,19 +1,28 @@
 // src/controllers/websiteFormsController.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Website enquiry-form endpoints — replace two PHP scripts whose SMTP is broken
+// Website form endpoints — replace three PHP scripts whose SMTP is broken
 // (same approach as websiteAppointmentController / book-appointment-mail.php):
 //
+//   POST https://<backend-host>/hms/websiteForms/career    ← career-mail.php
 //   POST https://<backend-host>/hms/websiteForms/campaign  ← campaign-mail.php
 //   POST https://<backend-host>/hms/websiteForms/amp       ← mailchimp-post.php
 //
 // Mounted in app.js:
 //   app.use("/hms/websiteForms", websiteFormsController);
 //
-// Each one: validate → INSERT into hhc_appointments.appointments → mail the
-// location (TO admin inbox, CC that location's list from
-// src/config/websiteFormRecipients.js). See src/models/websiteEnquiryModel.js.
+// career:          validate → INSERT into hhc_appointments.careerlead →
+//                  mail HR with the resume (PDF/DOC/DOCX) attached. The
+//                  resume is never saved on the server.
+//                  See src/models/careerLeadModel.js.
+// campaign / amp:  validate → INSERT into hhc_appointments.appointments → mail
+//                  the location (TO admin inbox, CC that location's list).
+//                  See src/models/websiteEnquiryModel.js.
+// Recipients for all three: src/config/websiteFormRecipients.js.
 //
 // ── Request fields (unchanged from the PHP) ─────────────────────────────────
+//   career:   fname, lname, phone_no, address, city, zipcode, email_id,
+//             current_cmp, feedback, file (resume) — the form must be
+//             enctype="multipart/form-data", as it already is for the PHP
 //   campaign: yourname, youremail, yourphone, selected_area, yourmessage,
 //             subjectText, utmsource            (+ Referer header → pageurl)
 //   amp:      name, email, phoneno, selected_area, message, pagesubject
@@ -22,9 +31,14 @@
 // or JSON.
 //
 // ── Replies ─────────────────────────────────────────────────────────────────
-// campaign is a normal <form method="post"> submission, so — exactly like the
-// PHP — it answers with a tiny HTML page that fires the Meta pixel and sends
-// the visitor on:
+// career and campaign are normal <form method="post"> submissions, so — exactly
+// like the PHP — they answer with a tiny HTML page (Meta pixel + alert +
+// redirect):
+//   career  success → Lead pixel + "Your message has been sent" → /career-form/
+//           errors  → same alerts as the PHP ("Please fill the required
+//                     fields", "Only PDF, DOC and DOCX files are allowed.")
+//                     → /career-form/
+//   campaign:
 //   success → per location (see `pixel` in the recipients config):
 //               PageView pixel 913144286745452 → /thank-you/      or
 //               Lead pixel 2199419837014290 + "Thank you…" alert → /thank-you/
@@ -47,34 +61,51 @@ const express = require("express");
 const router = express.Router();
 
 const {
+  submitCareerLead,
+  CONFIG: CAREER_CONFIG,
+} = require("../models/careerLeadModel");
+const {
   submitCampaignEnquiry,
   submitAmpEnquiry,
 } = require("../models/websiteEnquiryModel");
 const { SITE } = require("../models/websiteFormUtils");
 
+const CAREER_PAGE = `${SITE}/career-form/`;
 const THANK_YOU = `${SITE}/thank-you/`;
 const AMP_THANK_YOU = `${SITE}/amp/thank-you/`;
 
 /* ── Body parsing (multer required lazily, as in websiteAppointment) ─────── */
 
 let fieldsOnly = null;
+let careerUpload = null;
 try {
   // eslint-disable-next-line global-require
   const multer = require("multer");
   fieldsOnly = multer({ limits: { fields: 50, fieldSize: 64 * 1024 } }).none();
+  // Resume kept in memory only: validated and attached to the HR mail by the
+  // model, then dropped. Nothing is written to disk.
+  careerUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fields: 50,
+      fieldSize: 64 * 1024,
+      files: 1,
+      fileSize: CAREER_CONFIG.MAX_BYTES,
+    },
+  }).single("file");
 } catch (e) {
   console.warn(
-    "websiteForms: multer not installed — multipart/form-data posts (incl. the AMP form) " +
+    "websiteForms: multer not installed — multipart/form-data posts (career form, AMP form) " +
       "will be refused. Run `npm install multer`.",
   );
 }
 
-/** Run multer only for multipart requests; hand errors to onError. */
-function multipart(onError) {
+/** Run a multer middleware only for multipart requests; hand errors to onError. */
+function multipart(onError, mw = fieldsOnly) {
   return (req, res, next) => {
     if (!req.is("multipart/form-data")) return next();
-    if (!fieldsOnly) return onError(res, new Error("multer not installed"));
-    return fieldsOnly(req, res, (err) => (err ? onError(res, err) : next()));
+    if (!mw) return onError(res, new Error("multer not installed"));
+    return mw(req, res, (err) => (err ? onError(res, err) : next()));
   };
 }
 
@@ -137,6 +168,54 @@ function replyPage(res, { pixel, alert, redirect }) {
         "</body></html>",
     );
 }
+
+/* ── career-mail.php ─────────────────────────────────────────────────────── */
+
+const careerError = (res, alert) =>
+  replyPage(res, { alert, redirect: CAREER_PAGE });
+
+function careerUploadError(res, err) {
+  if (err && err.code === "LIMIT_FILE_SIZE") {
+    const mb = Math.round(CAREER_CONFIG.MAX_BYTES / 1024 / 1024);
+    return careerError(res, `File is too large. Maximum size is ${mb} MB.`);
+  }
+  console.error("careerLead: bad upload —", err && err.message);
+  return careerError(res, "Unable to upload the file. Please try again.");
+}
+
+router.post(
+  "/career",
+  urlencoded,
+  multipart(careerUploadError, careerUpload),
+  async (req, res) => {
+    try {
+      if (isBot(req.body)) return replyPage(res, { redirect: CAREER_PAGE });
+      if (rateLimited("career", req)) {
+        return careerError(
+          res,
+          "Too many submissions. Please try again later.",
+        );
+      }
+
+      const { status } = await submitCareerLead(req.body || {}, req.file);
+      switch (status) {
+        case "success":
+          return replyPage(res, {
+            pixel: "lead",
+            alert: "Your message has been sent",
+            redirect: CAREER_PAGE,
+          });
+        case "badType":
+          return careerError(res, "Only PDF, DOC and DOCX files are allowed.");
+        default: // "missing"
+          return careerError(res, "Please fill the required fields");
+      }
+    } catch (e) {
+      console.error("careerLead: unexpected error —", e);
+      return careerError(res, "Something went wrong...");
+    }
+  },
+);
 
 /* ── campaign-mail.php ───────────────────────────────────────────────────── */
 

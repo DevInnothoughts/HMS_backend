@@ -1,7 +1,7 @@
 // src/models/websiteFormUtils.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared helpers for the website enquiry forms (campaign, AMP) — the Node
-// ports of campaign-mail.php and mailchimp-post.php.
+// Shared helpers for the website forms (career, campaign, AMP) — the Node
+// ports of career-mail.php, campaign-mail.php and mailchimp-post.php.
 //
 // Mail goes through the shared ticketing mailer (src/services/mailer.js), so it
 // uses the same TICKETING_SMTP_* settings in .env — nothing new to configure.
@@ -70,7 +70,14 @@ function insertLead(sql, params) {
  * Send one lead mail. Never throws; resolves { sent, reason }.
  * Logs loudly when SMTP isn't configured, so a silent outage is visible.
  */
-async function sendLeadMail({ tag, to = ADMIN_TO, cc = [], subject, html }) {
+async function sendLeadMail({
+  tag,
+  to = ADMIN_TO,
+  cc = [],
+  subject,
+  html,
+  attachments,
+}) {
   if (!isConfigured()) {
     console.error(`${tag}: TICKETING_SMTP_* not set in .env — mail not sent`);
     return { sent: false, reason: "SMTP is not configured" };
@@ -82,6 +89,7 @@ async function sendLeadMail({ tag, to = ADMIN_TO, cc = [], subject, html }) {
     cc: addressList(cc, [to]),
     subject,
     html,
+    attachments,
   });
   if (!res.sent) console.error(`${tag}: mail failed —`, res.reason);
   return res;

@@ -21,7 +21,10 @@
 //     (The PHP saved the row, sent nothing, and showed a blank page.)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { CAMPAIGN_ROUTES, AMP_ROUTES } = require("../config/websiteFormRecipients");
+const {
+  CAMPAIGN_ROUTES,
+  AMP_ROUTES,
+} = require("../config/websiteFormRecipients");
 const {
   EMAIL_RE,
   str,
@@ -52,7 +55,14 @@ function mailHtml(f) {
 async function saveRow(tag, f) {
   try {
     await insertLead(INSERT_SQL, [
-      f.name, f.email, f.phone, f.area, f.message, nowSqlIST(), f.pageurl, f.utmsource,
+      f.name,
+      f.email,
+      f.phone,
+      f.area,
+      f.message,
+      nowSqlIST(),
+      f.pageurl,
+      f.utmsource,
     ]);
   } catch (e) {
     console.error(`${tag}: insert failed —`, e.message, {
@@ -92,7 +102,7 @@ async function submitCampaignEnquiry(body = {}, meta = {}) {
     subjectText: str(body.subjectText),
     // PHP $_REQUEST['utmsource'] — POST body or query string
     utmsource: str(body.utmsource || query.utmsource),
-    pageurl: str(meta.referer),
+    pageurl: str(body.currenturl),
   };
   f.mailArea = f.area;
 
@@ -141,7 +151,7 @@ async function submitAmpEnquiry(body = {}, meta = {}) {
     area: str(body.selected_area),
     message: str(body.message),
     pageSubject: str(body.pagesubject),
-    pageurl: str(meta.referer),
+    pageurl: str(body.currenturl),
   };
   f.utmsource = utmFromUrl(f.pageurl);
 

@@ -69,9 +69,12 @@ function transport() {
  *   fromName  display name for the From line (default "One HHC"); the address
  *             is always TICKETING_SMTP_USER
  *   replyTo   Reply-To address (website forms: info@healinghandsclinic.co.in)
+ *   attachments  nodemailer attachments, e.g. [{ filename, content: Buffer }]
+ *                (website career form: the applicant's resume)
  *
  * @param {{to:string|string[], subject:string, text?:string, html?:string,
- *          cc?:string|string[]|object[], fromName?:string, replyTo?:string}} msg
+ *          cc?:string|string[]|object[], fromName?:string, replyTo?:string,
+ *          attachments?:object[]}} msg
  */
 async function sendMail(msg) {
   const to = Array.isArray(msg.to) ? msg.to.filter(Boolean).join(", ") : msg.to;
@@ -95,6 +98,9 @@ async function sendMail(msg) {
       to,
       ...(cc && (!Array.isArray(cc) || cc.length) ? { cc } : {}),
       ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+      ...(Array.isArray(msg.attachments) && msg.attachments.length
+        ? { attachments: msg.attachments }
+        : {}),
       subject: msg.subject,
       text: msg.text,
       html: msg.html,
