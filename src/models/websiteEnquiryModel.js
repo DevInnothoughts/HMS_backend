@@ -3,9 +3,11 @@
 // Website enquiry forms — Node ports of:
 //   campaign-mail.php   → submitCampaignEnquiry()  (landing-page form)
 //   contact-mail.php    → submitContactEnquiry()   (contact-page form)
+//   appointment-medical-tourism.php
+//                       → submitMedicalTourismEnquiry() (medical-tourism form)
 //   mailchimp-post.php  → submitAmpEnquiry()       (AMP-page form)
 //
-// All three do the same thing:
+// All of them do the same thing:
 //   1. Validate the fields
 //   2. INSERT into hhc_appointments.appointments
 //        (name, email_id, phoneno, selected_area, message, date, pageurl, utmsource)
@@ -25,6 +27,7 @@
 const {
   CAMPAIGN_ROUTES,
   CONTACT_ROUTES,
+  MEDICAL_TOURISM_ROUTES,
   AMP_ROUTES,
 } = require("../config/websiteFormRecipients");
 const {
@@ -50,6 +53,9 @@ function mailHtml(f) {
   msg += `For Location. : ${esc(f.mailArea)}<br>`;
   if (f.visitingFor !== undefined) {
     msg += `Visiting For. : ${esc(f.visitingFor)}<br>`; // contact form only
+  }
+  if (f.country !== undefined) {
+    msg += `Country : ${esc(f.country)}<br>`; // medical tourism form only
   }
   msg += `Message. : ${esc(f.message)}<br>`;
   msg += `Page Url: ${esc(f.pageurl)}<br>`;
@@ -204,6 +210,66 @@ async function submitContactEnquiry(body = {}, meta = {}) {
   return { status: "success", pixel: route ? route.pixel : "pageview" };
 }
 
+/* ── appointment-medical-tourism.php ─────────────────────────────────────── */
+
+/**
+ * Medical-tourism page form. Fields: fullname, Email, mobile, country,
+ * selected_branch, message, utmsource (+ currenturl / Referer → pageurl).
+ *
+ * Same steps as the PHP: all fields required → INSERT into appointments
+ * (selected_branch goes in selected_area) → mail the location with
+ * "<label> - Medical Tourism Appointment". "Select Location" is saved as-is
+ * and shown as "Not mentioned" in the mail, as in the PHP.
+ *
+ * Small additions to the PHP mail: the Country line (the PHP required the
+ * field but never saved or mailed it, so it was lost) and Lead Source.
+ * There is no DB column for country, as before.
+ *
+ * @returns {Promise<{status:'success'|'error', pixel?:'lead'}>} never rejects
+ */
+async function submitMedicalTourismEnquiry(body = {}, meta = {}) {
+  const query = meta.query || {};
+  const f = {
+    name: str(body.fullname),
+    email: str(body.Email),
+    phone: str(body.mobile),
+    country: str(body.country),
+    area: str(body.selected_branch),
+    message: str(body.message),
+    // PHP $_REQUEST['utmsource'] — POST body or query string
+    utmsource: str(body.utmsource || query.utmsource),
+    pageurl: str(body.currenturl || meta.referer),
+  };
+
+  // The PHP only checked that each field was filled in (no email format check).
+  if (!f.name || !f.email || !f.phone || !f.country || !f.area || !f.message) {
+    return { status: "error" };
+  }
+
+  f.mailArea = f.area === "Select Location" ? "Not mentioned" : f.area;
+
+  await saveRow("medicalTourismEnquiry", f);
+
+  const route = MEDICAL_TOURISM_ROUTES[f.area];
+  if (!route) {
+    console.warn(
+      `medicalTourismEnquiry: location "${f.area}" has no recipient list — sent to admin only. ` +
+        "Add it to MEDICAL_TOURISM_LABELS in src/config/websiteFormRecipients.js.",
+    );
+  }
+
+  await sendLeadMail({
+    tag: "medicalTourismEnquiry",
+    cc: route ? route.recipients : [],
+    subject: route
+      ? route.subject
+      : `${f.mailArea} - Medical Tourism Appointment`,
+    html: mailHtml(f),
+  });
+
+  return { status: "success", pixel: "lead" };
+}
+
 /* ── mailchimp-post.php (AMP) ────────────────────────────────────────────── */
 
 /**
@@ -262,6 +328,7 @@ async function submitAmpEnquiry(body = {}, meta = {}) {
 module.exports = {
   submitCampaignEnquiry,
   submitContactEnquiry,
+  submitMedicalTourismEnquiry,
   submitAmpEnquiry,
   utmFromUrl,
 };

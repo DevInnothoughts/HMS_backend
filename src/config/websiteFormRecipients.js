@@ -2,10 +2,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Website lead forms — who gets the mail for each form / location.
 //
-// Ported 1:1 from four PHP files:
+// Ported 1:1 from five PHP files:
 //   career-mail.php      → CAREER_MAIL
 //   campaign-mail.php    → CAMPAIGN_ROUTES   (landing-page enquiry form)
 //   contact-mail.php     → CONTACT_ROUTES    (contact-page enquiry form)
+//   appointment-medical-tourism.php → MEDICAL_TOURISM_ROUTES
+//                                     (medical-tourism page form)
 //   mailchimp-post.php   → AMP_ROUTES        (AMP pages' enquiry form)
 //
 // The KEY is the exact `selected_area` value the website form posts.
@@ -354,6 +356,86 @@ const CONTACT_ROUTES = {
   },
 };
 
+/* ── appointment-medical-tourism.php ─────────────────────────────────────── */
+// The PHP's recipient lists are the SAME as campaign-mail.php for every
+// location, except:
+//   • Thane goes to hhc.thane@gmail.com (campaign/contact use
+//     healinghandsclinicthane@gmail.com) — kept exactly as the PHP had it
+//   • there is no plain "Pune" (Gastric Balloon) option on this form
+// So recipients are taken from CAMPAIGN_ROUTES (a change there applies here
+// too) and only the subject label is per location:
+//     "<label> - Medical Tourism Appointment"
+// (the Bengaluru area labels have no " -" before "Medical Tourism", as in the
+// PHP). Every location gets the Lead pixel + "Thank you…" alert.
+const MEDICAL_TOURISM_LABELS = {
+  "Pune - Dhole Patil Road": "Dhole Patil Road (Pune) -",
+  "Pune - Tilak Road": "Tilak Road (Pune) -",
+  "Pune - Kothrud": "Kothrud (Pune) -",
+  "Pimpri & Chinchwad": "Pimpri & Chinchwad -",
+  "Pune - Chakan": "Chakan (Pune) -",
+  "Pune - Dighi": "Dighi (Pune) -",
+  "Pune - Undri": "Undri(Pune) -",
+  "Pune - Loni Kalbhor (Hadapsar)": "Pune - Loni Kalbhor (Hadapsar) -",
+  "Pune - Katraj": "Katraj(Pune) -",
+  "Pune - Hinjawadi": "Hinjawadi(Pune) -",
+  "Pune - Wanowrie": "Salunkhe Vihar, Wanowrie(Pune) -",
+  "Pune - Baner": "Baner (Pune) -",
+  "Navi Mumbai": "Navi Mumbai -",
+  "Mumbai - Kemps Corner": "Kemps Corner (Mumbai) -",
+  "Thane - Kapurbawdi": "Thane -",
+  "Mumbai - Andheri West": "Andheri West -",
+  "Mumbai - Vashi": "Vashi -",
+  Kalyan: "Kalyan -",
+  Nashik: "Nashik -",
+  Kolhapur: "Kolhapur -",
+  Latur: "Latur -",
+  Aurangabad: "Aurangabad -",
+  Belagavi: "Belagavi -",
+  Bengaluru: "Bengaluru JP Nagar -",
+  "Bengaluru - Indiranagar": "Bengaluru - Indiranagar",
+  "Bengaluru - Sahakarnagar": "Bengaluru - Sahakar Nagar",
+  "Bengaluru - HSR Layout": "Bengaluru - HSR Layout",
+  "Bengaluru - Rajajinagar": "Bengaluru - Rajajinagar",
+  "Bengaluru - Whitefield": "Bengaluru - Whitefield",
+  "Bengaluru - Electronic City": "Bengaluru - Electronic City",
+  "Bengaluru - RR Nagar": "Bengaluru - RR Nagar",
+  "Bengaluru - Kalyan Nagar": "Bengaluru - Kalyan Nagar",
+  "Bengaluru - Sarjapur": "Bengaluru - Sarjapura",
+  Hyderabad: "Hyderabad -",
+  Secunderabad: "Secunderabad -",
+  Ludhiana: "Ludhiana -",
+  Indore: "Indore -",
+  Mysore: "Mysore -",
+  Surat: "Surat -",
+  "Adajan - Pal": "Pal -",
+  Mohali: "Mohali -",
+  Ahmedabad: "Ahmedabad -",
+  Bopal: "Bopal -",
+  Raipur: "Raipur -",
+  "Gurugram - Sector 49": "Gurugram Sector 49 -",
+  "Gurugram - Sector 14": "Gurugram Sector 14 -",
+  Jaipur: "Jaipur -",
+  Kalaburagi: "Kalaburagi -",
+  Lucknow: "Lucknow -",
+  Dubai: "Dubai -",
+};
+
+const MEDICAL_TOURISM_OVERRIDES = {
+  "Thane - Kapurbawdi": [p("hhc.thane@gmail.com", "HHC Thane"), MAHIMA],
+};
+
+const MEDICAL_TOURISM_ROUTES = Object.fromEntries(
+  Object.entries(MEDICAL_TOURISM_LABELS).map(([area, label]) => [
+    area,
+    {
+      subject: `${label} Medical Tourism Appointment`,
+      pixel: LEAD,
+      recipients:
+        MEDICAL_TOURISM_OVERRIDES[area] || CAMPAIGN_ROUTES[area].recipients,
+    },
+  ]),
+);
+
 /* ── mailchimp-post.php (AMP form) ───────────────────────────────────────── */
 // subject          → full subject line
 // pageSubjectLabel → when set and the form posts `pagesubject`, the subject
@@ -543,4 +625,10 @@ const AMP_ROUTES = {
   Dubai: { subject: "Dubai - AMP Enquiry", recipients: [ROSHAN, PANKAJ] },
 };
 
-module.exports = { CAREER_MAIL, CAMPAIGN_ROUTES, CONTACT_ROUTES, AMP_ROUTES };
+module.exports = {
+  CAREER_MAIL,
+  CAMPAIGN_ROUTES,
+  CONTACT_ROUTES,
+  MEDICAL_TOURISM_ROUTES,
+  AMP_ROUTES,
+};
