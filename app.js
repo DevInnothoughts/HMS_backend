@@ -37,6 +37,7 @@ const { isReminderWindow } = require("./src/services/businessHours");
 const practoLeadController = require("./src/controllers/practoLeadController");
 const websiteAppointmentController = require("./src/controllers/websiteAppointmentController");
 const overViewController = require("./src/controllers/overviewController");
+const websiteFormsController = require("./src/controllers/websiteFormsController");
 
 const {
   syncAppointments,
@@ -144,6 +145,8 @@ app.use("/hms/hexaLead", hexaLeadController);
 app.use("/hms/practoLead", practoLeadController);
 // Website "Book Appointment" form (replaces book-appointment-mail.php)
 app.use("/hms/websiteAppointment", websiteAppointmentController);
+// Website enquiry forms (replace campaign-mail.php and mailchimp-post.php)
+app.use("/hms/websiteForms", websiteFormsController);
 app.use("/hms/overview", overViewController);
 
 // Error handling middleware

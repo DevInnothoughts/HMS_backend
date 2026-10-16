@@ -68,9 +68,10 @@ function transport() {
  *   cc        string | string[] | nodemailer address objects
  *   fromName  display name for the From line (default "One HHC"); the address
  *             is always TICKETING_SMTP_USER
+ *   replyTo   Reply-To address (website forms: info@healinghandsclinic.co.in)
  *
  * @param {{to:string|string[], subject:string, text?:string, html?:string,
- *          cc?:string|string[]|object[], fromName?:string}} msg
+ *          cc?:string|string[]|object[], fromName?:string, replyTo?:string}} msg
  */
 async function sendMail(msg) {
   const to = Array.isArray(msg.to) ? msg.to.filter(Boolean).join(", ") : msg.to;
@@ -93,6 +94,7 @@ async function sendMail(msg) {
       from: `"${msg.fromName || "One HHC"}" <${process.env.TICKETING_SMTP_USER}>`,
       to,
       ...(cc && (!Array.isArray(cc) || cc.length) ? { cc } : {}),
+      ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
       subject: msg.subject,
       text: msg.text,
       html: msg.html,
