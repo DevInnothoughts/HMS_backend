@@ -54,6 +54,7 @@ const LOCATION_ALIASES = {
   Adajan: ["Adajan"],
   "Electronic City": ["Electronic City", "Electronics City"],
   "Kalyan Nagar": ["Kalyan Nagar"],
+  Gachibowli: ["Gachibowli"],
 };
 
 const ALL_LOCATIONS = Object.keys(LOCATION_ALIASES);

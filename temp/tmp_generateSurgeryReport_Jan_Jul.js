@@ -23,10 +23,17 @@
  *      excluded surgeries = patient-months whose invoices are ALL excluded
  *      excluded revenue   = SUM(totalamt) of the excluded invoices
  *    So, per branch per month, gross = net + excluded EXACTLY.
+ * 3. PREVIOUS-YEAR LOCATION SHEETS: the model writes the "Surg/Rev by Loc-…"
+ *    sheets for the current year only. The script runs the model a second time
+ *    with the previous year as "current" (same patch → also net), takes those
+ *    sheets from that run, and inserts each one right after its current-year
+ *    counterpart. Sheet names get a year suffix so both years sit side by side.
  *
  * ── Workbook (same layout as the gross file, plus) ──────────────────────────
  *   Monthly Totals / Location Summary   + IB excl. surgeries & ₹, both years
- *   By Surgery Type / Loc-Type sheets   net (excluded cases carry no type)
+ *   By Surgery Type                     net (excluded cases carry no type)
+ *   Surg/Rev by Loc-Month <Y> and <P>   net, one sheet per year
+ *   Surg/Rev by Loc-Type  <Y> and <P>   net, one sheet per year
  *   Interbranch <year> (×2, new)        branch × month: excluded # and ₹
  *   Interbranch Warnings (only if any)  branches whose excluded lookup failed
  *
@@ -234,6 +241,35 @@ function applyInterbranch(report, ib) {
   return report;
 }
 
+/* ── 3. PREVIOUS-YEAR location sheets (model re-run, previous year as current) */
+
+// The model's per-location sheets ("Surg by Loc-Month", "Rev by Loc-Type", …).
+const LOC_SHEET_RE = /^(Surg|Rev) by Loc-/;
+
+// Sheet name without any year in it — used to pair the two runs' sheets.
+const sheetKey = (name) =>
+  name
+    .replace(/\s*\b(19|20)\d{2}\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// "<base> <year>", kept inside Excel's 31-char sheet-name limit.
+const withYear = (name, yr) => {
+  const base = sheetKey(name);
+  const suffix = ` ${yr}`;
+  return base.slice(0, 31 - suffix.length) + suffix;
+};
+
+async function getPreviousYearReport(report) {
+  const { previousYear, startMonth, endMonth } = report.period;
+  return getMonthwiseSurgeryReport(LOCATIONS, {
+    year: previousYear,
+    previousYear: previousYear - 1, // only the "current" side of this run is used
+    startMonth,
+    endMonth,
+  });
+}
+
 /* ── Workbook additions ──────────────────────────────────────────────────── */
 
 const NUM_FMT = '#,##0;(#,##0);"-"';
@@ -361,7 +397,45 @@ function buildInterbranchSheet(report, which, yr) {
   return ws;
 }
 
-function buildWorkbookIB(report) {
+// Renames the current-year location sheets "<name> <Y>" and inserts the
+// previous-year copy "<name> <P>" right after each one.
+function addPreviousYearLocSheets(wb, prevReport, year, previousYear) {
+  const prevWb = buildMonthwiseSurgeryWorkbook(prevReport); // net, P as "current"
+  const prevByKey = {};
+  for (const name of prevWb.SheetNames)
+    if (LOC_SHEET_RE.test(name))
+      prevByKey[sheetKey(name)] = prevWb.Sheets[name];
+
+  const order = [];
+  const missing = [];
+  for (const name of wb.SheetNames) {
+    if (!LOC_SHEET_RE.test(name)) {
+      order.push(name);
+      continue;
+    }
+    const curName = withYear(name, year);
+    if (curName !== name) {
+      wb.Sheets[curName] = wb.Sheets[name];
+      delete wb.Sheets[name];
+    }
+    order.push(curName);
+
+    const prevWs = prevByKey[sheetKey(name)];
+    if (!prevWs) {
+      missing.push(name);
+      continue;
+    }
+    const lastCol = xlsx.utils.decode_range(prevWs["!ref"]).e.c;
+    markNet(prevWs, lastCol, NOTE_NET);
+    const prevName = withYear(name, previousYear);
+    wb.Sheets[prevName] = prevWs;
+    order.push(prevName);
+  }
+  wb.SheetNames = order;
+  return missing;
+}
+
+function buildWorkbookIB(report, prevReport) {
   const { year, previousYear } = report.period;
   const wb = buildMonthwiseSurgeryWorkbook(report); // model layout, net figures
 
@@ -374,11 +448,18 @@ function buildWorkbookIB(report) {
   );
   markNet(wb.Sheets["By Surgery Type"], 7, NOTE_NET);
   for (const name of wb.SheetNames)
-    if (/^(Surg|Rev) by Loc-/.test(name)) {
+    if (LOC_SHEET_RE.test(name)) {
       const ws = wb.Sheets[name];
       const lastCol = xlsx.utils.decode_range(ws["!ref"]).e.c;
       markNet(ws, lastCol, NOTE_NET);
     }
+
+  // Previous-year copies of the per-location sheets
+  const missing = addPreviousYearLocSheets(wb, prevReport, year, previousYear);
+  if (missing.length)
+    console.warn(
+      `\n⚠️  No ${previousYear} counterpart found for: ${missing.join(", ")}`,
+    );
 
   xlsx.utils.book_append_sheet(
     wb,
@@ -434,13 +515,37 @@ function buildWorkbookIB(report) {
     const ib = await getInterbranchExcluded(report);
     applyInterbranch(report, ib);
 
-    // 3) Workbook
-    const wb = buildWorkbookIB(report);
+    // 3) Previous year as "current" (net too) — feeds the <P> location sheets
+    const patchedBefore = invoiceQueriesPatched;
+    const prevReport = await getPreviousYearReport(report);
+    const prevOk =
+      prevReport.locationsRequested.length - prevReport.locationsFailed.length;
+    if (prevOk > 0 && invoiceQueriesPatched === patchedBefore)
+      throw new Error(
+        "Interbranch patch was not applied to the previous-year run — refusing to write gross sheets.",
+      );
+
+    // Cross-check: previous-year totals must match the main run's "previous" side
+    const pMain = report.totals.previous;
+    const pRun = prevReport.totals.current;
+    if (
+      pMain.surgeries !== pRun.surgeries ||
+      Math.abs((pMain.revenue || 0) - (pRun.revenue || 0)) > 1
+    )
+      console.warn(
+        `\n⚠️  ${report.period.previousYear} totals differ between runs: ` +
+          `main ${pMain.surgeries} SX / ₹${round2(pMain.revenue)} vs ` +
+          `re-run ${pRun.surgeries} SX / ₹${round2(pRun.revenue)} — check before sharing.`,
+      );
+
+    // 4) Workbook
+    const wb = buildWorkbookIB(report, prevReport);
     const { year, previousYear, startMonth, endMonth } = report.period;
     const fileName = `Monthwise_Surgeries_${year}_vs_${previousYear}_${pad2(startMonth)}-${pad2(endMonth)}_IPDnet.xlsx`;
     const filePath = path.join(__dirname, "..", "src", "report", fileName);
     xlsx.writeFile(wb, filePath);
     console.log(`\n✅ Workbook written: ${filePath}`);
+    console.log(`   Sheets: ${wb.SheetNames.join(" | ")}`);
 
     // Sanity print
     const inr = (n) => Math.round(Number(n) || 0).toLocaleString("en-IN");
@@ -475,6 +580,12 @@ function buildWorkbookIB(report) {
     if (report.locationsFailed.length) {
       console.warn("\n⚠️  Skipped branches (see 'Skipped Locations' sheet):");
       report.locationsFailed.forEach((f) =>
+        console.warn(`   • ${f.location}: ${f.error}`),
+      );
+    }
+    if (prevReport.locationsFailed.length) {
+      console.warn(`\n⚠️  Skipped in the ${previousYear} location sheets:`);
+      prevReport.locationsFailed.forEach((f) =>
         console.warn(`   • ${f.location}: ${f.error}`),
       );
     }

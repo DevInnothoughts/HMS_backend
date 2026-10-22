@@ -66,6 +66,9 @@ const locations = [
   "Kalyan",
   "Bopal",
   "Electronic City",
+  "Raipur",
+  "Gachibowli",
+  "Kalyan Nagar",
 ];
 
 async function getQueryResult(loc, fromDate, toDate) {

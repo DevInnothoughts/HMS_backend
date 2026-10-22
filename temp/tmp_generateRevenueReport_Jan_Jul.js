@@ -12,32 +12,44 @@
  * IPD *cash collection* is carried for reference but is NOT part of the total —
  * same as generateSummaryReport's grandTotal.
  *
- * ── INTERBRANCH ADJUSTMENT (new) ────────────────────────────────────────────
+ * ── INTERBRANCH ADJUSTMENT ──────────────────────────────────────────────────
  * When a patient's OPD is at branch A (source) but the surgery is at branch B
  * (operating), the SAME invoice exists in both branch DBs. The revenue belongs
- * to the SOURCE branch, so the operating branch's copy is excluded — the same
- * rule the app now applies everywhere (src/models/utils/interbranch.js):
+ * to the SOURCE branch, so the operating branch's copy is excluded — the rule
+ * in src/models/utils/interbranch.js (countedSql), used by every IPD screen:
  *
- *     excluded  = patient_location set AND interbranch_id = 0/NULL
+ *     excluded  = patient_location set AND COALESCE(interbranch_id, 0) = 0
  *                 (except patient_location 'DP Road', which is always counted)
  *
- * The model (monthlyRevenueReportModel → getLocationSummary) is shared and still
- * counts every invoice, so it is NOT changed. Instead this runner:
+ * This runner applies it EXACTLY the way the backend already does in
+ * reportMailModel.generateSummaryReportV2 (INTERBRANCH_SQL +
+ * applyInterbranchToBranch), without changing any shared model:
  *
- *   1. runs the model as before            → GROSS figures
- *   2. queries, per branch per month, the interbranch invoices the rule
- *      excludes — same date bounds and is_deleted filter as getLocationSummary's
- *      IPD query, so   NET = GROSS − EXCLUDED   exactly
- *   3. writes the workbook on NET figures, with the difference shown:
+ *   • reportMailModel.getLocationSummary is wrapped FOR THIS PROCESS ONLY.
+ *     Each call (one per branch × month) also runs the V2 interbranch query —
+ *     same invoice table, same creation_date bounds (00:00:00 / 23:59:59),
+ *     same is_deleted filter, same totalamt — and nets the result in place:
  *
- *        Monthly Summary        IPD Billed (gross) · Interbranch excl. · IPD
- *                               Billed (net) · Total (net), both years
- *        By Location <year>     NET totals (as before, now corrected)
- *        Interbranch <year>     per branch per month: excluded amount + count
- *        Skipped Locations      only if a branch failed
+ *         ipdInvoice.total  −= excluded       grandTotal −= excluded
+ *         ipdInvoice.byStatus / totalDiscount netted the same way
  *
- *   Totals across branches are now correct: an interbranch surgery is counted
- *   once, at its source branch, instead of at both.
+ *   • monthlyRevenueReportModel therefore aggregates NET figures everywhere —
+ *     Monthly Summary, By Location <year>, window totals — so a branch is
+ *     never half-netted, even if it fails part-way through the window.
+ *   • If the interbranch query fails for a branch-month, that call FAILS, so
+ *     the model skips the branch and lists it under "Skipped Locations". A
+ *     gross figure is never silently mixed into net totals.
+ *   • The script STOPS if the wrapper was never used (e.g. the model stopped
+ *     calling getLocationSummary), instead of writing a gross workbook.
+ *
+ * Workbook:
+ *     Monthly Summary        IPD Billed gross · Interbranch excl. · IPD Billed
+ *                            net · Total net / gross, both years
+ *     By Location <year>     NET totals per branch per month
+ *     Interbranch <year>     per branch per month: excluded amount + invoices
+ *     Skipped Locations      only if a branch failed
+ *
+ *   Gross = net + interbranch excl., per branch per month, exactly.
  *
  * ── Connection resilience (temp/_dbResilience.js) ───────────────────────────
  * All branch DBs share one MySQL host. Before anything runs, the pools for the
@@ -49,11 +61,12 @@
  *
  * ── Runtime warning ─────────────────────────────────────────────────────────
  * The model calls getLocationSummary ONCE PER (location, year, month), walking
- * months sequentially. The interbranch pass adds one light query per
- * (location, year, month). Expect it to take a while; let it finish.
+ * months sequentially; each call now adds one light interbranch query.
+ * Expect it to take a while; let it finish.
  *
  * ── Place this file in temp/ ─────────────────────────────────────────────────
- * It requires ../src/models/monthlyRevenueReportModel, ../databaseUtils and
+ * It requires ../src/models/monthlyRevenueReportModel,
+ * ../src/models/reportMailModel, ../databaseUtils and
  * ../src/models/utils/interbranch.
  *
  * ── Run ─────────────────────────────────────────────────────────────────────
@@ -63,7 +76,7 @@
  *   node temp/tmp_generateRevenueReport_Jan_Jul.js "Navi Mumbai,Andheri,Thane,Vashi"
  *
  *   # override the window too:  <locations> <year> <startMonth> <endMonth>
- *   node temp/tmp_generateRevenueReport_Jan_Jul.js "Andheri,Thane" 2026 1 7
+ *   node temp/tmp_generateRevenueReport_Jan_Jul.js "Andheri,Thane, Vashi, Navi Mumbai, Kalyan" 2026 1 9
  *
  * ── Output ──────────────────────────────────────────────────────────────────
  *   src/report/Monthwise_Revenue_2026_vs_2025_01-07_IPDnet.xlsx
@@ -77,12 +90,13 @@ const fs = require("fs");
 const path = require("path");
 const xlsx = require("xlsx");
 
+const { getConnectionByLocation } = require("../databaseUtils");
+const { countedSql } = require("../src/models/utils/interbranch");
+const reportMailModel = require("../src/models/reportMailModel");
 const {
   getMonthwiseRevenue,
   buildMonthwiseRevenueWorkbook,
 } = require("../src/models/monthlyRevenueReportModel");
-const { getConnectionByLocation } = require("../databaseUtils");
-const { countedSql } = require("../src/models/utils/interbranch");
 const { harden, preflight, getRetriesUsed } = require("./_dbResilience");
 
 /* ── Config ──────────────────────────────────────────────────────────────── */
@@ -121,22 +135,12 @@ const reportsDir = path.join(__dirname, "..", "src", "report");
 
 const pad2 = (n) => String(n).padStart(2, "0");
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const pctChange = (cur, prev) =>
-  prev > 0 ? round2(((cur - prev) / prev) * 100) : cur > 0 ? null : 0;
 const pctFraction = (cur, prev) =>
   prev > 0 ? (cur - prev) / prev : cur > 0 ? null : 0;
 
 const CURRENCY_FMT = '#,##0;(#,##0);"-"';
 const PCT_FMT = '0.0%;(0.0%);"-"';
 const COUNT_FMT = '0;(0);"-"';
-
-function monthBounds(year, month) {
-  const lastDay = new Date(year, month, 0).getDate();
-  return {
-    start: `${year}-${pad2(month)}-01`,
-    end: `${year}-${pad2(month)}-${pad2(lastDay)}`,
-  };
-}
 
 function formatRange(ws, c0, c1, r0, r1, fmt) {
   for (let r = r0; r <= r1; r++)
@@ -146,169 +150,144 @@ function formatRange(ws, c0, c1, r0, r1, fmt) {
     }
 }
 
-/* ── Interbranch pass ────────────────────────────────────────────────────── */
+/* ── Interbranch: the backend's own V2 rule, applied per summary call ────── */
 
-// Same bounds and is_deleted filter as getLocationSummary's IPD invoice query,
-// restricted to the rows the interbranch rule EXCLUDES. So net = gross − this.
-const IB_SQL = `
-  SELECT COUNT(*) AS cnt, COALESCE(SUM(i.totalamt), 0) AS amount
+// Identical to reportMailModel's INTERBRANCH_SQL (used by
+// generateSummaryReportV2): same table, bounds, is_deleted filter and amount
+// column as getLocationSummary's IPD invoice query, restricted to the rows
+// countedSql excludes. So net = gross − this, exactly.
+const INTERBRANCH_SQL = `
+  SELECT i.status,
+         COUNT(*)                        AS cnt,
+         COALESCE(SUM(i.totalamt), 0)    AS amount,
+         COALESCE(SUM(i.discount), 0)    AS discount
     FROM invoice i
    WHERE i.creation_date >= ? AND i.creation_date <= ?
      AND i.is_deleted != 1
      AND NOT (${countedSql("i")})
+   GROUP BY i.status
 `;
 
-function runQuery(connection, sql, params) {
-  return new Promise((resolve, reject) =>
-    connection.query(sql, params, (err, rows) =>
-      err ? reject(err) : resolve(rows),
-    ),
-  );
+function interbranchFor(location, from, to) {
+  return new Promise((resolve, reject) => {
+    const { connection } = getConnectionByLocation(location);
+    if (!connection) return reject(new Error(`Invalid location: ${location}`));
+    connection.query(
+      INTERBRANCH_SQL,
+      [`${from} 00:00:00`, `${to} 23:59:59`],
+      (err, rows) => {
+        if (err) return reject(err);
+        const out = { invoices: 0, amount: 0, discount: 0, byStatus: {} };
+        for (const r of rows || []) {
+          const amt = Number(r.amount) || 0;
+          out.invoices += Number(r.cnt) || 0;
+          out.amount += amt;
+          out.discount += Number(r.discount) || 0;
+          out.byStatus[r.status] = (out.byStatus[r.status] || 0) + amt;
+        }
+        resolve(out);
+      },
+    );
+  });
 }
 
-/**
- * → { [loc]: { [`${yr}-${m}`]: { amount, count } } }, plus failures.
- * Branches the model already dropped are skipped, so net stays consistent
- * with what the model counted.
- */
-async function getInterbranchExcluded(locations, years, months, skip) {
-  const out = {};
-  const failures = [];
-  const bad = new Set(skip);
-  for (const loc of locations) out[loc] = {};
-
-  for (const yr of years) {
-    for (const m of months) {
-      await Promise.all(
-        locations.map(async (loc) => {
-          if (bad.has(loc)) return;
-          const { start, end } = monthBounds(yr, m);
-          try {
-            const { connection } = getConnectionByLocation(loc);
-            if (!connection) throw new Error("invalid location");
-            const [row] = await runQuery(connection, IB_SQL, [
-              `${start} 00:00:00`,
-              `${end} 23:59:59`,
-            ]);
-            out[loc][`${yr}-${m}`] = {
-              amount: Number(row?.amount) || 0,
-              count: Number(row?.cnt) || 0,
-            };
-          } catch (e) {
-            bad.add(loc);
-            failures.push({ location: loc, error: e?.message || String(e) });
-          }
-        }),
-      );
-    }
+// Same netting as reportMailModel.applyInterbranchToBranch.
+function netSummary(s, ib) {
+  const inv =
+    s.ipdInvoice ||
+    (s.ipdInvoice = { byStatus: {}, total: 0, totalDiscount: 0 });
+  inv.grossTotal = Number(inv.total) || 0;
+  inv.interbranch = ib;
+  s.grandTotalGross = Number(s.grandTotal) || 0;
+  if (!ib.invoices) return s;
+  for (const [st, amt] of Object.entries(ib.byStatus)) {
+    if (!inv.byStatus) inv.byStatus = {};
+    const left = (Number(inv.byStatus[st]) || 0) - amt;
+    if (Math.abs(left) < 0.005) delete inv.byStatus[st];
+    else inv.byStatus[st] = left;
   }
-  return { byLoc: out, failures };
+  inv.total = inv.grossTotal - ib.amount;
+  inv.totalDiscount = (Number(inv.totalDiscount) || 0) - ib.discount;
+  s.grandTotal = s.grandTotalGross - ib.amount;
+  return s;
 }
 
-/* ── Apply the adjustment to the model's report ──────────────────────────── */
+// Excluded figures, recorded ONLY for summaries the model actually received:
+// { [loc]: { [`${yr}-${m}`]: { amount, count } } }
+const IB = {};
+let wrappedCalls = 0;
 
-function applyInterbranch(report, ib) {
+// monthlyRevenueReportModel requires reportMailModel lazily and reads
+// getLocationSummary off its exports at call time, so replacing the export
+// here reaches it. Process-local: nothing on disk changes.
+const origGetLocationSummary = reportMailModel.getLocationSummary;
+reportMailModel.getLocationSummary = async (location, fromDate, toDate) => {
+  const [s, ib] = await Promise.all([
+    origGetLocationSummary(location, fromDate, toDate),
+    interbranchFor(location, fromDate, toDate).catch((e) => {
+      // Fail the call: the model then skips this branch (Skipped Locations)
+      // rather than counting a gross month among net ones.
+      throw new Error(`interbranch lookup failed — ${e?.message || e}`);
+    }),
+  ]);
+  netSummary(s, ib);
+  const [yr, mm] = String(fromDate).split("-");
+  (IB[location] ||= {})[`${Number(yr)}-${Number(mm)}`] = {
+    amount: ib.amount,
+    count: ib.invoices,
+  };
+  wrappedCalls += 1;
+  return s;
+};
+
+/* ── Attach excluded / gross figures to the (already net) report ─────────── */
+
+function attachInterbranch(report) {
   const { year, previousYear } = report.period;
   const monthNums = report.months.map((m) => m.month);
-  // A branch whose lookup failed at ANY month stays wholly gross — adjusting
-  // only some of its months would make its trend meaningless.
-  const ibFailed = new Set(ib.failures.map((f) => f.location));
   const ibAt = (loc, yr, m) =>
-    (!ibFailed.has(loc) && ib.byLoc[loc]?.[`${yr}-${m}`]) || {
-      amount: 0,
-      count: 0,
-    };
-
-  // Only branches the model actually counted contribute.
-  const counted = report.locationsRequested.filter(
-    (l) => !report.locationsFailed.some((f) => f.location === l),
-  );
-
-  const sumMonth = (yr, m) =>
-    counted.reduce(
+    IB[loc]?.[`${yr}-${m}`] || { amount: 0, count: 0 };
+  const sum = (yr, months) =>
+    report.locationsRequested.reduce(
       (acc, loc) => {
-        const v = ibAt(loc, yr, m);
-        acc.amount += v.amount;
-        acc.count += v.count;
+        for (const m of months) {
+          const v = ibAt(loc, yr, m);
+          acc.amount += v.amount;
+          acc.count += v.count;
+        }
         return acc;
       },
       { amount: 0, count: 0 },
     );
-
-  // Per-month aggregates: keep gross, subtract excluded for net.
-  report.months.forEach((mm) => {
-    for (const [side, yr] of [
-      ["current", year],
-      ["previous", previousYear],
-    ]) {
-      const b = mm[side];
-      const x = sumMonth(yr, mm.month);
-      b.ipdInvoiceGross = b.ipdInvoice;
-      b.interbranchExcluded = round2(x.amount);
-      b.interbranchCount = x.count;
-      b.ipdInvoice = round2(b.ipdInvoice - x.amount);
-      b.totalGross = b.total;
-      b.total = round2(b.total - x.amount);
-    }
-    mm.change = {
-      amount: round2(mm.current.total - mm.previous.total),
-      pct: pctChange(mm.current.total, mm.previous.total),
-    };
-  });
-
-  // Window totals.
-  for (const [side, yr] of [
+  const sides = [
     ["current", year],
     ["previous", previousYear],
-  ]) {
-    const t = report.totals[side];
-    const x = monthNums.reduce(
-      (acc, m) => {
-        const v = sumMonth(yr, m);
-        acc.amount += v.amount;
-        acc.count += v.count;
-        return acc;
-      },
-      { amount: 0, count: 0 },
-    );
-    t.ipdInvoiceGross = t.ipdInvoice;
-    t.interbranchExcluded = round2(x.amount);
-    t.interbranchCount = x.count;
-    t.ipdInvoice = round2(t.ipdInvoice - x.amount);
-    t.totalGross = t.total;
-    t.total = round2(t.total - x.amount);
-  }
-  report.totals.change = {
-    amount: round2(report.totals.current.total - report.totals.previous.total),
-    pct: pctChange(report.totals.current.total, report.totals.previous.total),
+  ];
+  const decorate = (b, x) => {
+    b.interbranchExcluded = round2(x.amount);
+    b.interbranchCount = x.count;
+    if (b.ipdInvoice != null)
+      b.ipdInvoiceGross = round2(b.ipdInvoice + x.amount);
+    b.totalGross = round2(b.total + x.amount);
   };
 
-  // Per-location month rows (the By Location sheets read `.total`).
-  for (const loc of counted) {
+  report.months.forEach((mm) => {
+    for (const [side, yr] of sides) decorate(mm[side], sum(yr, [mm.month]));
+  });
+  for (const [side, yr] of sides)
+    decorate(report.totals[side], sum(yr, monthNums));
+
+  for (const loc of report.locationsRequested)
     (report.byLocation[loc] || []).forEach((r) => {
-      for (const [side, yr] of [
-        ["current", year],
-        ["previous", previousYear],
-      ]) {
-        const v = ibAt(loc, yr, r.month);
-        r[side].totalGross = r[side].total;
-        r[side].interbranchExcluded = round2(v.amount);
-        r[side].interbranchCount = v.count;
-        r[side].total = round2(r[side].total - v.amount);
-      }
-      r.change = {
-        amount: round2(r.current.total - r.previous.total),
-        pct: pctChange(r.current.total, r.previous.total),
-      };
+      for (const [side, yr] of sides) decorate(r[side], ibAt(loc, yr, r.month));
     });
-  }
 
   report.definition =
     "Monthly total = OPD collection + IPD billed NET of interbranch + Pharmacy " +
     "collection. Interbranch invoices operated at a branch for another branch " +
-    "are excluded (counted at the source branch; DP Road always counted). " +
+    "are excluded (counted at the source branch; DP Road always counted) — the " +
+    "same rule as the IPD Invoice screen and the summary report. " +
     "IPD cash collection is listed for reference only and is NOT in the total.";
-  report.interbranch = ib;
   return report;
 }
 
@@ -357,7 +336,7 @@ function buildSummarySheetIB(report) {
     p.total,
     p.interbranchExcluded,
     p.totalGross,
-    c.total - p.total,
+    round2(c.total - p.total),
     pctFraction(c.total, p.total) ?? "N/A",
     c.ipdCollection,
   ];
@@ -432,31 +411,18 @@ function buildInterbranchSheet(report, which, yr) {
 
   report.locationsRequested.forEach((loc) => {
     const skipped = report.locationsFailed.some((f) => f.location === loc);
-    const ibFailed = report.interbranch?.failures?.some(
-      (f) => f.location === loc,
-    );
-    const failed = skipped || ibFailed;
     const rows = report.byLocation[loc] || [];
-    const amts = rows.map((r) =>
-      failed ? 0 : Number(r[which]?.interbranchExcluded) || 0,
-    );
-    const cnts = rows.map((r) =>
-      failed ? 0 : Number(r[which]?.interbranchCount) || 0,
-    );
-    const ta = amts.reduce((a, b) => a + b, 0);
+    const amts = rows.map((r) => Number(r[which]?.interbranchExcluded) || 0);
+    const cnts = rows.map((r) => Number(r[which]?.interbranchCount) || 0);
+    const ta = round2(amts.reduce((a, b) => a + b, 0));
     const tc = cnts.reduce((a, b) => a + b, 0);
     amts.forEach((v, i) => (colAmt[i] += v));
     cnts.forEach((v, i) => (colCnt[i] += v));
     gAmt += ta;
     gCnt += tc;
-    const label = skipped
-      ? `${loc} (skipped)`
-      : ibFailed
-        ? `${loc} (lookup failed — gross)`
-        : loc;
-    aoa.push([label, ...amts, ta, ...cnts, tc]);
+    aoa.push([skipped ? `${loc} (skipped)` : loc, ...amts, ta, ...cnts, tc]);
   });
-  aoa.push(["Total", ...colAmt, gAmt, ...colCnt, gCnt]);
+  aoa.push(["Total", ...colAmt.map(round2), round2(gAmt), ...colCnt, gCnt]);
 
   const ws = xlsx.utils.aoa_to_sheet(aoa);
   ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: header.length - 1 } }];
@@ -488,8 +454,8 @@ function buildInterbranchSheet(report, which, yr) {
   );
   console.log(`Branches : ${LOCATIONS.join(", ")}`);
   console.log(
-    `Workload : ~${LOCATIONS.length * 2 * monthCount} summary calls ` +
-      `+ the same number of interbranch queries — be patient.`,
+    `Workload : ~${LOCATIONS.length * 2 * monthCount} summary calls, ` +
+      `each with one interbranch query — be patient.`,
   );
   console.log("──────────────────────────────────────────────────────────");
 
@@ -506,7 +472,7 @@ function buildInterbranchSheet(report, which, yr) {
       `  ✓ database host reachable · max ${maxConcurrent} concurrent queries`,
     );
 
-    // 1) Gross, from the unchanged model.
+    // 1) Model run — every getLocationSummary call is netted of interbranch.
     const report = await getMonthwiseRevenue(LOCATIONS, OPTIONS);
     if (report.locationsFailed.length === LOCATIONS.length) {
       throw new Error(
@@ -516,20 +482,18 @@ function buildInterbranchSheet(report, which, yr) {
             .join(" | "),
       );
     }
+    if (wrappedCalls === 0) {
+      throw new Error(
+        "Interbranch netting was never applied (getLocationSummary wrapper " +
+          "unused) — refusing to write a gross workbook.",
+      );
+    }
 
-    // 2) Interbranch exclusions, same windows.
-    const monthNums = report.months.map((m) => m.month);
-    const ib = await getInterbranchExcluded(
-      LOCATIONS,
-      [report.period.year, report.period.previousYear],
-      monthNums,
-      report.locationsFailed.map((f) => f.location),
-    );
+    // 2) Show what was excluded, and gross = net + excluded.
+    attachInterbranch(report);
 
-    // 3) Net figures + workbook.
-    applyInterbranch(report, ib);
-
-    const wb = buildMonthwiseRevenueWorkbook(report); // By Location sheets read net totals
+    // 3) Workbook (By Location sheets already read net totals).
+    const wb = buildMonthwiseRevenueWorkbook(report);
     wb.Sheets["Monthly Summary"] = buildSummarySheetIB(report);
     const { year, previousYear, startMonth, endMonth } = report.period;
     xlsx.utils.book_append_sheet(
@@ -542,17 +506,6 @@ function buildInterbranchSheet(report, which, yr) {
       buildInterbranchSheet(report, "previous", previousYear),
       `Interbranch ${previousYear}`,
     );
-    if (ib.failures.length) {
-      const ws = xlsx.utils.aoa_to_sheet([
-        [
-          "Interbranch lookup failed — figures for these branches are GROSS",
-          "Reason",
-        ],
-        ...ib.failures.map((f) => [f.location, f.error]),
-      ]);
-      ws["!cols"] = [{ wch: 60 }, { wch: 55 }];
-      xlsx.utils.book_append_sheet(wb, ws, "Interbranch Warnings");
-    }
 
     if (!fs.existsSync(reportsDir))
       fs.mkdirSync(reportsDir, { recursive: true });
@@ -613,16 +566,10 @@ function buildInterbranchSheet(report, which, yr) {
         console.warn(`   • ${f.location}: ${f.error}`),
       );
       console.warn(
-        "   Note: a branch is dropped for the WHOLE window after its first " +
-          "failed month, so its earlier months are excluded from the totals too.",
-      );
-    }
-    if (ib.failures.length) {
-      console.warn(
-        "\n⚠️  Interbranch lookup failed for (their figures stay GROSS — see 'Interbranch Warnings'):",
-      );
-      ib.failures.forEach((f) =>
-        console.warn(`   • ${f.location}: ${f.error}`),
+        "   Note: the model skips a branch from its first failed month onward " +
+          "(it walks the current year, then the previous year). Months fetched " +
+          "before the failure stay in the totals, already net — so that " +
+          "branch's year-on-year comparison is incomplete. Re-run if possible.",
       );
     }
 
@@ -632,7 +579,7 @@ function buildInterbranchSheet(report, which, yr) {
       );
     console.log(`\nDone in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     // Non-zero exit if any branch is missing, so it can't pass unnoticed.
-    process.exit(report.locationsFailed.length || ib.failures.length ? 1 : 0);
+    process.exit(report.locationsFailed.length ? 1 : 0);
   } catch (err) {
     console.error(
       "\n❌ Revenue report generation failed:",

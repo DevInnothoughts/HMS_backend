@@ -108,6 +108,7 @@ const locations = [
   "Adajan",
   "Raipur",
   "Kalyan Nagar",
+  "Gachibowli",
 ];
 
 app.use(express.json());
@@ -214,8 +215,8 @@ cron.schedule(
 //       //   ["Andheri", "Thane", "Navi Mumbai", "Vashi"],
 //       // );
 //       generateAllBranchFeedbackExcel({
-//         from: "2026-10-05",
-//         to: "2026-10-11",
+//         from: "2026-10-12",
+//         to: "2026-10-18",
 //         locations,
 //       })
 //         .then((r) => console.log("Feedback workbook:", r.filePath))
