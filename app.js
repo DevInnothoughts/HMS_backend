@@ -38,6 +38,7 @@ const practoLeadController = require("./src/controllers/practoLeadController");
 const websiteAppointmentController = require("./src/controllers/websiteAppointmentController");
 const overViewController = require("./src/controllers/overviewController");
 const websiteFormsController = require("./src/controllers/websiteFormsController");
+const agencyLeadsController = require("./src/controllers/agencyLeadsController"); // Ad Agency: Google-only, no IVR
 
 const {
   syncAppointments,
@@ -149,6 +150,7 @@ app.use("/hms/websiteAppointment", websiteAppointmentController);
 // Website enquiry forms (replace campaign-mail.php and mailchimp-post.php)
 app.use("/hms/websiteForms", websiteFormsController);
 app.use("/hms/overview", overViewController);
+app.use("/hms/agencyLeads", agencyLeadsController);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
