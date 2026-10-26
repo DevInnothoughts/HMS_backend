@@ -22,6 +22,14 @@
 //     loses the lead. (The PHP die()'d.)
 //   • A location with no recipient list is mailed to the admin inbox and logged.
 //     (The PHP saved the row, sent nothing, and showed a blank page.)
+//
+// Leads Tracker sheet (added Oct 2026):
+//   After the INSERT, every form also pushes the lead to the "Web Leads" tab of
+//   the Leads Tracker Google Sheet through its Apps Script webhook
+//   (src/services/leadSheetWebhook.js). Fire-and-forget: it never delays or
+//   changes the reply. visitingFor (contact) and country (medical tourism),
+//   which have no DB column, are carried to the sheet too. Needs
+//   LEAD_SHEET_WEBHOOK_URL + LEAD_SHEET_WEBHOOK_SECRET in .env.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const {
@@ -38,6 +46,11 @@ const {
   insertLead,
   sendLeadMail,
 } = require("./websiteFormUtils");
+const {
+  pushLeadToSheet,
+  campaignFor,
+  pageTopic,
+} = require("../services/leadSheetWebhook");
 
 const INSERT_SQL = `
   INSERT INTO appointments
@@ -63,9 +76,10 @@ function mailHtml(f) {
   return msg;
 }
 
+/** Inserts the row; resolves appointments.id, or null if the insert failed. */
 async function saveRow(tag, f) {
   try {
-    await insertLead(INSERT_SQL, [
+    const res = await insertLead(INSERT_SQL, [
       f.name,
       f.email,
       f.phone,
@@ -75,13 +89,55 @@ async function saveRow(tag, f) {
       f.pageurl,
       f.utmsource,
     ]);
+    return (res && res.insertId) || null;
   } catch (e) {
     console.error(`${tag}: insert failed —`, e.message, {
       name: f.name,
       phone: f.phone,
       area: f.area,
     });
+    return null;
   }
+}
+
+/**
+ * Push one enquiry to the Leads Tracker sheet ("Web Leads" tab).
+ * Fire-and-forget; sent even when the insert failed so the lead isn't lost.
+ * Key names avoid the script's alias list (see leadSheetWebhook.js).
+ *
+ * @param {string} tag        log tag, e.g. "campaignEnquiry"
+ * @param {string} form       form id for Extra Data, e.g. "campaign"
+ * @param {string} formLabel  campaign fallback, e.g. "Website – Campaign form"
+ * @param {object} f          normalised form fields
+ * @param {number|null} apptId  appointments.id from saveRow()
+ */
+function pushToSheet(tag, form, formLabel, f, apptId) {
+  const parts = [];
+  if (f.visitingFor) parts.push(`Visiting for: ${f.visitingFor}`);
+  if (f.message) parts.push(f.message);
+  if (f.country) parts.push(`Country: ${f.country}`);
+  const topic = pageTopic(f.pageurl);
+  if (topic) parts.push(topic);
+
+  pushLeadToSheet(tag, {
+    source: "web",
+    name: f.name,
+    phone: f.phone,
+    // "Select Location" means none was chosen — leave the column for the caller
+    city: f.area === "Select Location" ? "" : f.area,
+    message: parts.join(" | "),
+    campaign: campaignFor(f.utmsource, f.pageurl, formLabel),
+    // ── Extra Data (JSON)
+    form,
+    appointment_id: apptId || "",
+    ext_ref: apptId ? `appt:${apptId}` : "",
+    email: f.email,
+    pageurl: f.pageurl,
+    utmsource: f.utmsource,
+    visiting_for: f.visitingFor,
+    country: f.country,
+    page_subject: f.pageSubject,
+  });
 }
 
 // utm_source from the page URL's query string (mailchimp-post.php did this).
@@ -121,7 +177,14 @@ async function submitCampaignEnquiry(body = {}, meta = {}) {
     return { status: "error" };
   }
 
-  await saveRow("campaignEnquiry", f);
+  const apptId = await saveRow("campaignEnquiry", f);
+  pushToSheet(
+    "campaignEnquiry",
+    "campaign",
+    "Website – Campaign form",
+    f,
+    apptId,
+  );
 
   const route = CAMPAIGN_ROUTES[f.area];
   if (!route) {
@@ -187,7 +250,8 @@ async function submitContactEnquiry(body = {}, meta = {}) {
     return { status: "error" };
   }
 
-  await saveRow("contactEnquiry", f);
+  const apptId = await saveRow("contactEnquiry", f);
+  pushToSheet("contactEnquiry", "contact", "Website – Contact form", f, apptId);
 
   const route = CONTACT_ROUTES[f.area];
   if (!route) {
@@ -248,7 +312,14 @@ async function submitMedicalTourismEnquiry(body = {}, meta = {}) {
 
   f.mailArea = f.area === "Select Location" ? "Not mentioned" : f.area;
 
-  await saveRow("medicalTourismEnquiry", f);
+  const apptId = await saveRow("medicalTourismEnquiry", f);
+  pushToSheet(
+    "medicalTourismEnquiry",
+    "medical_tourism",
+    "Website – Medical Tourism form",
+    f,
+    apptId,
+  );
 
   const route = MEDICAL_TOURISM_ROUTES[f.area];
   if (!route) {
@@ -298,7 +369,8 @@ async function submitAmpEnquiry(body = {}, meta = {}) {
   // As in the PHP: the raw value is saved; the mail says "Not mentioned".
   f.mailArea = f.area === "Select Location" ? "Not mentioned" : f.area;
 
-  await saveRow("ampEnquiry", f);
+  const apptId = await saveRow("ampEnquiry", f);
+  pushToSheet("ampEnquiry", "amp", "Website – AMP form", f, apptId);
 
   const route = AMP_ROUTES[f.area];
   if (!route) {

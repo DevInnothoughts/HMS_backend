@@ -24,12 +24,24 @@
 //
 // Mail goes through the shared ticketing mailer (src/services/mailer.js), so it
 // uses the same TICKETING_SMTP_* settings in .env — nothing new to configure.
+//
+// Leads Tracker sheet (added Oct 2026):
+//   After step 3 the lead is also pushed to the "Web Leads" tab of the Leads
+//   Tracker Google Sheet via its Apps Script webhook
+//   (src/services/leadSheetWebhook.js). Fire-and-forget: it never delays or
+//   changes the reply, and runs even if the mail later fails. Needs
+//   LEAD_SHEET_WEBHOOK_URL + LEAD_SHEET_WEBHOOK_SECRET in .env.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../databaseUtils");
 const { BOOKING_RECIPIENTS } = require("../config/bookingRecipients");
 
 const { sendMail, isConfigured } = require("../services/mailer");
+const {
+  pushLeadToSheet,
+  campaignFor,
+  pageTopic,
+} = require("../services/leadSheetWebhook");
 
 const FROM_NAME = "Healing Hands Clinic";
 const ADMIN_TO = "innothoughtsadwords@gmail.com"; // same main receiver as the PHP
@@ -175,6 +187,56 @@ function addressList(list, skip = []) {
   return out;
 }
 
+/* ── Leads Tracker sheet ─────────────────────────────────────────────────── */
+
+/**
+ * Lead for the sheet webhook. The appointment details go in the message, so
+ * the calling team sees them on Master Leads ("Message from Lead"); the
+ * structured values go in Extra Data. Key names avoid the script's alias list
+ * (see leadSheetWebhook.js) — e.g. the form's own `source` is sent as
+ * `lead_source`, because `source` picks the sheet tab.
+ *
+ * @param {object} f        the normalised form fields
+ * @param {string} dateDmy  the date as the visitor entered it (d/m/Y)
+ * @param {number|null} apptId  appointments.id, or null if the insert failed
+ */
+function sheetLead(f, dateDmy, apptId) {
+  const type = ucfirst(f.apptType) || "Clinic";
+  const parts = [
+    `Book Appointment – ${type} consultation on ${dateDmy}${f.selectedSlot ? `, ${f.selectedSlot}` : ""}`,
+  ];
+  if (f.apptType === "online" && f.paymentId) {
+    parts.push(`Paid ₹${f.amount} (${f.paymentId})`);
+  }
+  const topic = pageTopic(f.previousUrl);
+  if (topic) parts.push(topic);
+
+  return {
+    source: "web",
+    name: f.fname,
+    phone: f.phone,
+    city: f.branch,
+    message: parts.join(" | "),
+    campaign: campaignFor(
+      f.source,
+      f.previousUrl,
+      "Website – Book Appointment",
+    ),
+    // ── Extra Data (JSON)
+    form: "book_appointment",
+    appointment_id: apptId || "",
+    ext_ref: apptId ? `appt:${apptId}` : "",
+    email: f.email,
+    pageurl: f.previousUrl,
+    lead_source: f.source,
+    appt_date: dateDmy,
+    appt_slot: f.selectedSlot,
+    appt_type: f.apptType,
+    payment_id: f.paymentId,
+    amount: f.apptType === "online" ? f.amount : "",
+  };
+}
+
 /* ── Main ─────────────────────────────────────────────────────────────────── */
 
 /**
@@ -216,8 +278,10 @@ async function bookWebsiteAppointment(body = {}) {
       : "";
 
   // 3 — insert (logged on failure; the mail still goes, as in the PHP)
+  let apptId = null;
   try {
-    await insertAppointment(f);
+    const res = await insertAppointment(f);
+    apptId = (res && res.insertId) || null;
   } catch (e) {
     console.error("websiteAppointment: insert failed —", e.message, {
       name: f.fname,
@@ -225,6 +289,13 @@ async function bookWebsiteAppointment(body = {}) {
       branch: f.branch,
     });
   }
+
+  // 3b — Leads Tracker sheet (fire-and-forget; never affects the reply).
+  // Sent even when the insert failed, so the calling team still gets the lead.
+  pushLeadToSheet(
+    "websiteAppointment",
+    sheetLead(f, str(body.apptDate), apptId),
+  );
 
   // 4 — branch mail (TO admin, CC the branch list)
   if (!isConfigured()) {
@@ -278,4 +349,5 @@ module.exports = {
   parseApptDate,
   routeFor,
   addressList,
+  sheetLead,
 };

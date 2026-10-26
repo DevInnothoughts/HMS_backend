@@ -55,7 +55,13 @@ yarn-error.log
 # Bundle artifact
 *.jsbundle
 
-hhc-hms-firebase-adminsdk-1rpj7-fdd7d9b78e.json
+.env
+.env.*
+config.env
+
+hhc-hms-firebase-adminsdk-*.json
+devsupportGitHubKeys
+devsupportGitHubKeys.pub
 
 # Ruby / CocoaPods
 /ios/Pods/
