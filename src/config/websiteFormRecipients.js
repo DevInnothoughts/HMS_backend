@@ -36,6 +36,7 @@ const RECEPTION_HHC = p("reception.hhc@gmail.com", "Reception HHC");
 const SNEHAL = p("drsnehaljain@gmail.com", "Dr Snehal Jain");
 const UNDRI = p("healinghandsclinicundri@gmail.com", "HHC Undri");
 const GURUGRAM = p("Hhc.gurugram@gmail.com", "HHC Gurugram Team");
+const YASH = p("operations2.hhcpl@gmail.com", "Cluster Head");
 
 // Branch inboxes (used by both the campaign and AMP lists)
 const B = {
@@ -75,6 +76,7 @@ const B = {
   sarjapur: p("sarjapur@healinghandsclinic.co.in", "HHC Sarjapura"),
   hyderabad: p("hhchyderabad@gmail.com", "HHC Hyderabad"),
   secunderabad: p("laxma008@gmail.com", "HHC Secunderabad"),
+  gachibowli: p("gachibowli@healinghandsclinic.co.in", "HHC Gachibowli"),
   ludhiana: p("healinghandsclinicludhiana@gmail.com", "Ludhiana Team"),
   mysore: p("reception.hhcmysore@gmail.com", "Reception Mysore"),
   surat: p("hhcsurat@gmail.com", "HHC Surat"),
@@ -94,7 +96,7 @@ const B = {
 // info@healinghandsclinic.co.in line is commented out). Kept as-is; set
 // CAREER_MAIL_TO in .env to change it without a code change.
 const CAREER_MAIL = {
-  to: process.env.CAREER_MAIL_TO || "ajitinnothought@gmail.com",
+  to: process.env.CAREER_MAIL_TO || "info@healinghandsclinic.co.in",
   subject: "Career",
   recipients: [
     p("drsnehaljain@gmail.com", "Dr Snehal"),
@@ -144,12 +146,12 @@ const CAMPAIGN_ROUTES = {
   "Pune - Chakan": {
     subject: "Chakan (Pune) - ",
     pixel: PV,
-    recipients: [B.chakan, ROSHAN, MAYURI],
+    recipients: [B.chakan, ROSHAN, MAYURI, YASH],
   },
   "Pune - Dighi": {
     subject: "Dighi (Pune) - ",
     pixel: PV,
-    recipients: [B.dighi, ROSHAN, B.atul, MAYURI],
+    recipients: [B.dighi, ROSHAN, B.atul, MAYURI, YASH],
   },
   "Pune - Katraj": {
     subject: "Katraj(Pune) - ",
@@ -179,7 +181,7 @@ const CAMPAIGN_ROUTES = {
   "Pune - Baner": {
     subject: "Baner (Pune) - ",
     pixel: PV,
-    recipients: [B.baner, NEHA, B.yaman, MAYURI],
+    recipients: [B.baner, NEHA, B.yaman, MAYURI, YASH],
   },
   "Navi Mumbai": {
     subject: "Navi Mumbai - ",
@@ -277,12 +279,17 @@ const CAMPAIGN_ROUTES = {
   Hyderabad: {
     subject: "Hyderabad - ",
     pixel: PV,
-    recipients: [B.hyderabad, ROSHAN, MAHIMA, MAYURI],
+    recipients: [B.hyderabad, ROSHAN, MAHIMA, MAYURI, YASH],
   },
   Secunderabad: {
     subject: "Secunderabad - ",
     pixel: PV,
-    recipients: [B.secunderabad, ROSHAN, MAHIMA, MAYURI],
+    recipients: [B.secunderabad, ROSHAN, MAHIMA, MAYURI, YASH],
+  },
+  Gachibowli: {
+    subject: "Gachibowli - ",
+    pixel: PV,
+    recipients: [B.gachibowli, ROSHAN, MAHIMA, MAYURI, YASH],
   },
   Ludhiana: {
     subject: "Ludhiana - ",
@@ -305,13 +312,21 @@ const CAMPAIGN_ROUTES = {
     pixel: PV,
     recipients: [B.pal, ROSHAN, DEEPIKA],
   },
-  Mohali: { subject: "Mohali - ", pixel: PV, recipients: [B.mohali, ROSHAN] },
+  Mohali: {
+    subject: "Mohali - ",
+    pixel: PV,
+    recipients: [B.mohali, ROSHAN, PANKAJ],
+  },
   Ahmedabad: {
     subject: "Ahmedabad - ",
     pixel: PV,
     recipients: [B.ahmedabad, ROSHAN, MAHIMA],
   },
-  Bopal: { subject: "Bopal - ", pixel: PV, recipients: [B.bopal, ROSHAN] },
+  Bopal: {
+    subject: "Bopal - ",
+    pixel: PV,
+    recipients: [B.bopal, ROSHAN, MAHIMA],
+  },
   Raipur: {
     subject: "Raipur - ",
     pixel: PV,
@@ -320,12 +335,12 @@ const CAMPAIGN_ROUTES = {
   "Gurugram - Sector 49": {
     subject: "Gurugram Sector 49 - ",
     pixel: LEAD,
-    recipients: [B.gurugram49, GURUGRAM, MAYURI],
+    recipients: [B.gurugram49, GURUGRAM, MAYURI, YASH],
   },
   "Gurugram - Sector 14": {
     subject: "Gurugram Sector 14 - ",
     pixel: LEAD,
-    recipients: [B.gurugram14, GURUGRAM, MAYURI],
+    recipients: [B.gurugram14, GURUGRAM, MAYURI, YASH],
   },
   Jaipur: { subject: "Jaipur - ", pixel: PV, recipients: [ROSHAN, MAHIMA] },
   Kalaburagi: {
@@ -403,6 +418,7 @@ const MEDICAL_TOURISM_LABELS = {
   "Bengaluru - Sarjapur": "Bengaluru - Sarjapura",
   Hyderabad: "Hyderabad -",
   Secunderabad: "Secunderabad -",
+  Gachibowli: "Gachibowli -",
   Ludhiana: "Ludhiana -",
   Indore: "Indore -",
   Mysore: "Mysore -",
@@ -462,11 +478,11 @@ const AMP_ROUTES = {
   },
   "Pune - Chakan": {
     subject: "Chakan (Pune) - AMP Enquiry",
-    recipients: [B.chakan, ROSHAN, MAYURI],
+    recipients: [B.chakan, ROSHAN, MAYURI, YASH],
   },
   "Pune - Dighi": {
     subject: "Dighi (Pune) - AMP Enquiry",
-    recipients: [B.dighi, ROSHAN, B.atul, MAYURI],
+    recipients: [B.dighi, ROSHAN, B.atul, MAYURI, YASH],
   },
   "Pune - Undri": {
     subject: "Undri(Pune) - AMP Enquiry",
@@ -482,7 +498,7 @@ const AMP_ROUTES = {
   },
   "Pune - Katraj": {
     subject: "Katraj(Pune) - AMP Enquiry",
-    recipients: [ROSHAN, B.katraj],
+    recipients: [ROSHAN, B.katraj, DEEPIKA],
   },
   "Pune - Wanowrie": {
     subject: "Salunkhe Vihar, Wanowrie(Pune) - AMP Enquiry",
@@ -490,7 +506,7 @@ const AMP_ROUTES = {
   },
   "Pune - Baner": {
     subject: "Baner (Pune) - AMP Enquiry",
-    recipients: [B.baner, NEHA, B.yaman, MAYURI],
+    recipients: [B.baner, NEHA, B.yaman, MAYURI, YASH],
   },
   "Navi Mumbai": {
     subject: "Navi Mumbai - AMP Enquiry",
@@ -570,11 +586,15 @@ const AMP_ROUTES = {
   Hyderabad: {
     subject: "Hyderabad - AMP Enquiry",
     pageSubjectLabel: "Hyderabad",
-    recipients: [B.hyderabad, ROSHAN, MAHIMA, MAYURI],
+    recipients: [B.hyderabad, ROSHAN, MAHIMA, MAYURI, YASH],
   },
   Secunderabad: {
     subject: "Secunderabad - AMP Enquiry",
-    recipients: [B.secunderabad, ROSHAN, MAHIMA, MAYURI],
+    recipients: [B.secunderabad, ROSHAN, MAHIMA, MAYURI, YASH],
+  },
+  Gachibowli: {
+    subject: "Gachibowli - AMP Enquiry",
+    recipients: [B.gachibowli, ROSHAN, MAHIMA, MAYURI, YASH],
   },
   Ludhiana: {
     subject: "Ludhiana - AMP Enquiry",
@@ -597,11 +617,11 @@ const AMP_ROUTES = {
   },
   "Gurugram - Sector 49": {
     subject: "Gurugram - Sector 49 - AMP Enquiry",
-    recipients: [B.gurugram49, GURUGRAM, MAYURI],
+    recipients: [B.gurugram49, GURUGRAM, MAYURI, YASH],
   },
   "Gurugram - Sector 14": {
     subject: "Gurugram - Sector 14 - AMP Enquiry",
-    recipients: [B.gurugram14, GURUGRAM, MAYURI],
+    recipients: [B.gurugram14, GURUGRAM, MAYURI, YASH],
   },
   Jaipur: { subject: "Jaipur - AMP Enquiry", recipients: [ROSHAN, MAHIMA] },
   Kalaburagi: {
@@ -612,12 +632,18 @@ const AMP_ROUTES = {
     subject: "Lucknow - AMP Enquiry",
     recipients: [ROSHAN, B.lucknow, DEEPIKA],
   },
-  Mohali: { subject: "Mohali - AMP Enquiry", recipients: [ROSHAN, B.mohali] },
+  Mohali: {
+    subject: "Mohali - AMP Enquiry",
+    recipients: [ROSHAN, B.mohali, PANKAJ],
+  },
   Ahmedabad: {
     subject: "Ahmedabad - AMP Enquiry",
     recipients: [ROSHAN, B.ahmedabad, MAHIMA],
   },
-  Bopal: { subject: "Bopal - AMP Enquiry", recipients: [ROSHAN, B.bopal] },
+  Bopal: {
+    subject: "Bopal - AMP Enquiry",
+    recipients: [ROSHAN, B.bopal, MAHIMA],
+  },
   Raipur: {
     subject: "Raipur - AMP Enquiry",
     recipients: [B.raipur, ROSHAN, MAHIMA],
