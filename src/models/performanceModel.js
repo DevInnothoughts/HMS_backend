@@ -425,8 +425,8 @@ function buildChatbotWhere(location) {
   );
   let clause = "(" + pieces.join(" OR ") + ")";
 
-  // Vashi special: allow empties
-  if (location === "Vashi") {
+  // DP Road special: allow empties (blank-branch bot leads, previously Vashi)
+  if (location === "DP Road") {
     clause = "(" + clause + " OR (branch = '' AND chat_whatsapp_branch = ''))";
   }
 

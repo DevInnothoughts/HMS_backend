@@ -377,12 +377,12 @@ async function getBotLeads(location) {
   let areaConditions;
   let areaParams;
 
-  if (location === "Vashi") {
+  if (location === "DP Road") {
     areaConditions = areas
       .map(() => `(branch LIKE ? OR chat_whatsapp_branch LIKE ?)`)
       .join(" OR ");
 
-    // Add extra condition for blank branches
+    // DP Road also absorbs blank-branch bot leads (previously Vashi)
     areaConditions += " OR (branch = '' AND chat_whatsapp_branch = '')";
 
     areaParams = areas.flatMap((area) => [`%${area}%`, `%${area}%`]);
@@ -449,8 +449,8 @@ async function getBotLeads(location) {
         fetchLeadRecords(leadsDetailQuery, [...areaParams, start, end]),
       ]);
 
-    // Append message prefix for empty-branch records if location is Vashi
-    if (location === "Vashi") {
+    // Append message prefix for empty-branch records if location is DP Road
+    if (location === "DP Road") {
       botLeads.forEach((row) => {
         if (!row.branch && !row.chat_whatsapp_branch) {
           row.message = `OTHER BRANCH - ${row.message}`;

@@ -154,14 +154,6 @@ function buildAreaWhere(location) {
 
 // Bot leads: `chatbot_leads`.`branch` / `chat_whatsapp_branch`
 function buildBranchWhere(location) {
-  if (location === "Vashi") {
-    // Vashi also absorbs rows with both branch fields blank.
-    return {
-      whereClause: `(branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%') OR (branch = '' AND chat_whatsapp_branch = ''))`,
-      params: [location, location],
-    };
-  }
-
   const aliases = LOCATION_ALIASES[location] || [location];
   const conditions = [];
   const params = [];
@@ -172,6 +164,12 @@ function buildBranchWhere(location) {
     );
     params.push(alias, alias);
   });
+
+  // DP Road also absorbs bot leads with both branch fields blank
+  // (previously these went to Vashi).
+  if (location === "DP Road") {
+    conditions.push(`(branch = '' AND chat_whatsapp_branch = '')`);
+  }
 
   return { whereClause: `(${conditions.join(" OR ")})`, params };
 }

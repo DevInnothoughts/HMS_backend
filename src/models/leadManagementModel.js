@@ -203,6 +203,7 @@ async function getChatBotLeads(location) {
             (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%')) 
             OR (branch LIKE '%Tilak Road%' OR chat_whatsapp_branch LIKE '%Tilak Road%')
             OR (branch LIKE '%Dhole Patil Road%' OR chat_whatsapp_branch LIKE '%Dhole Patil Road%')
+            OR (branch = '' AND chat_whatsapp_branch = '')
           )
           ORDER BY id DESC
           LIMIT 100
@@ -338,26 +339,12 @@ async function getChatBotLeads(location) {
         `;
         queryParams = [location, location];
       }
-      if (location === "Vashi") {
-        query = `
-          SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, disease, chat_whatsapp_branch, query AS message, status, note
-          FROM chatbot_leads 
-          WHERE (
-            (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%')) 
-            OR (branch = '' AND chat_whatsapp_branch = '')
-          )
-          ORDER BY id DESC
-          LIMIT 100
-        `;
-        queryParams = [location, location];
-      }
-
       tempCon.query(query, queryParams, function (error, rows) {
         tempCon.release();
         if (error) return reject(error);
         rows.forEach((row) => {
           if (
-            location === "Vashi" &&
+            location === "DP Road" &&
             row.branch === "" &&
             row.chat_whatsapp_branch === ""
           ) {
@@ -414,7 +401,7 @@ async function syncAppointments(location) {
             AND appointment_timestamp >= ?
           LIMIT 1
         `,
-        [normalizedPhone, date]
+        [normalizedPhone, date],
       );
 
       // console.log("Matched:", rows);
@@ -422,7 +409,7 @@ async function syncAppointments(location) {
       if (rows && rows.length > 0) {
         const match = rows[0]; // This is your RowDataPacket
         const appointmentDate = new Date(
-          match.appointment_timestamp
+          match.appointment_timestamp,
         ).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" });
         const note = `Appointment booked on ${appointmentDate} and synchronised successfully.`;
         // console.log(note);
@@ -432,7 +419,7 @@ async function syncAppointments(location) {
     SET status = 'Appointment', note = ?
     WHERE appointment_id = ?
   `,
-          [note, appointment_id]
+          [note, appointment_id],
         );
         //console.log("Matched:", match);
         console.log(`✅ Synced ${location}: ${phoneno} → status updated.`);
@@ -487,7 +474,7 @@ async function syncBotAppointments(location) {
             AND appointment_timestamp >= ?
           LIMIT 1
         `,
-        [normalizedPhone, date]
+        [normalizedPhone, date],
       );
 
       //console.log("Matched:", rows);
@@ -495,7 +482,7 @@ async function syncBotAppointments(location) {
       if (rows && rows.length > 0) {
         const match = rows[0]; // This is your RowDataPacket
         const appointmentDate = new Date(
-          match.appointment_timestamp
+          match.appointment_timestamp,
         ).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" });
         const note = `Appointment booked on ${appointmentDate} and synchronised successfully.`;
         //console.log(note);
@@ -505,11 +492,11 @@ async function syncBotAppointments(location) {
           SET status = 'Appointment', note = ?
           WHERE id = ?
         `,
-          [note, appointment_id]
+          [note, appointment_id],
         );
         //console.log("Matched:", match);
         console.log(
-          `✅Bot Lead Synced ${location}: ${phoneno} → status updated.`
+          `✅Bot Lead Synced ${location}: ${phoneno} → status updated.`,
         );
       }
     }
@@ -633,11 +620,11 @@ async function getDatewiseLeads(location, fromDate, toDate) {
 
           // Count appointments from leads
           const appointments = allLeads.filter(
-            (lead) => lead.status === "Appointment"
+            (lead) => lead.status === "Appointment",
           );
 
           const appointmentPhones = appointments.map((a) =>
-            a.phoneno.replace(/^(\+91|91|0)/, "")
+            a.phoneno.replace(/^(\+91|91|0)/, ""),
           );
 
           let actualVisits = 0;
@@ -686,7 +673,7 @@ async function getDatewiseLeads(location, fromDate, toDate) {
 
               const invoiceResults = await clinicQuery(
                 invoiceQuery,
-                patientIds
+                patientIds,
               );
 
               ipdCount = invoiceResults.length;
@@ -763,31 +750,19 @@ async function getDatewiseBotLeads(location, fromDate, toDate) {
         ],
         Chinchwad: ["%Pimpri-Chinchwad%"],
       };
-      if (location === "Vashi") {
-        query = `
-          SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno,  email, disease, chat_whatsapp_branch, query AS message, status, note
-          FROM chatbot_leads 
-          WHERE (
-            (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%')) 
-            OR (branch = '' AND chat_whatsapp_branch = '')
-          )
-          AND DATE(datetime) BETWEEN ? AND ?
-          ORDER BY id DESC
-          LIMIT 100
-        `;
-        queryParams = [
-          location,
-          location,
-          `${fromDate}T00:00:00+05:30`,
-          `${toDate}T23:59:59+05:30`,
-        ];
-      } else if (locationMap[location]) {
-        const extraConditions = locationMap[location]
+      if (locationMap[location]) {
+        let extraConditions = locationMap[location]
           .map(
             (alias) =>
-              `(branch LIKE '${alias}' OR chat_whatsapp_branch LIKE '${alias}')`
+              `(branch LIKE '${alias}' OR chat_whatsapp_branch LIKE '${alias}')`,
           )
           .join(" OR ");
+
+        // DP Road also absorbs bot leads with both branch fields blank
+        // (previously these went to Vashi).
+        if (location === "DP Road") {
+          extraConditions += ` OR (branch = '' AND chat_whatsapp_branch = '')`;
+        }
 
         const baseCondition = `(branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%'))`;
 
@@ -795,8 +770,8 @@ async function getDatewiseBotLeads(location, fromDate, toDate) {
           SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, email, disease, chat_whatsapp_branch, query AS message, status, note
           FROM chatbot_leads 
           WHERE (${baseCondition}${
-          extraConditions ? ` OR ${extraConditions}` : ""
-        })
+            extraConditions ? ` OR ${extraConditions}` : ""
+          })
             AND DATE(datetime) BETWEEN ? AND ?
           ORDER BY id DESC
         `;
@@ -828,11 +803,11 @@ async function getDatewiseBotLeads(location, fromDate, toDate) {
         }
 
         const appointments = allLeads.filter(
-          (lead) => lead.status === "Appointment"
+          (lead) => lead.status === "Appointment",
         );
 
         const appointmentPhones = appointments.map((a) =>
-          a.phoneno.replace(/^(\+91|91|0)/, "")
+          a.phoneno.replace(/^(\+91|91|0)/, ""),
         );
 
         let actualVisits = 0;
