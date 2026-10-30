@@ -1,7 +1,7 @@
 // src/models/overview/ipdModel.js
 // ─────────────────────────────────────────────────────────────────────────────
 // The redesigned Inpatient section:
-//   metrics  Admissions · Male/Female · Revenue · Avg per patient
+//   metrics  Admissions · Male/Female · Revenue · Avg per bill
 //   tables   Patient type (invoice.status) · Surgery-wise (diagnosis.speciality)
 //   deltas   optional, against the preceding period of equal length
 //
@@ -36,6 +36,13 @@
 // Revenue is SUM(invoice.totalamt) with the interbranch rule applied — the
 // same figure overview/collectionModel's IPD slice produces, so it equals the
 // IPD slice of the home screen's billing bar.
+//
+// ── AVERAGE PER BILL (Oct 2026) ─────────────────────────────────────────────
+// The averages shown are per BILL (revenue / invoices), not per patient: a
+// patient can have more than one surgery in the selected period, and each is
+// its own invoice. `avgPerBill` is returned at the top level, on every
+// byStatus row and on every surgery row. `avgPerPatient` / row `avg` are still
+// returned unchanged so older app builds keep working.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { getConnectionByLocation } = require("../../../databaseUtils");
@@ -129,6 +136,7 @@ const INTERBRANCH_SQL = `
 // may predate the window.
 const PER_PATIENT_SQL = `
   SELECT i.patient_id,
+         COUNT(*)                     AS invoices,
          SUM(COALESCE(i.totalamt, 0)) AS amount,
          p.sex AS sex
   FROM invoice i
@@ -170,6 +178,10 @@ async function gather(run, from, to, detailed) {
     revenue,
     due: Math.round(n0(totals.due)),
     avgPerPatient: cases > 0 ? Math.round(revenue / cases) : null,
+    avgPerBill:
+      n0(totals.invoices) > 0
+        ? Math.round(revenue / n0(totals.invoices))
+        : null,
   };
 
   if (!detailed) return base;
@@ -178,17 +190,19 @@ async function gather(run, from, to, detailed) {
   const byStatus = statusRows
     .map((r) => {
       const patients = n0(r.patients);
+      const invoices = n0(r.invoices);
       const amount = Math.round(n0(r.amount));
       return {
         key: r.status,
         label: STATUS_LABEL[r.status] || r.status,
         patients,
-        invoices: n0(r.invoices),
+        invoices,
         amount,
         due: Math.round(n0(r.due)),
         // Charity bills at zero, so an average of 0 is a real answer here —
         // it must not be nulled out as "no data".
         avg: patients > 0 ? Math.round(amount / patients) : null,
+        avgPerBill: invoices > 0 ? Math.round(amount / invoices) : null,
       };
     })
     .sort((a, b) => {
@@ -238,8 +252,10 @@ async function surgeryRows(run, perPatient, to) {
     // normalisation DoctorPerformanceModel applies.
     const raw = latest[p.patient_id] || "Unspecified";
     const key = raw.toLowerCase();
-    if (!bucket[key]) bucket[key] = { label: raw, patients: 0, amount: 0 };
+    if (!bucket[key])
+      bucket[key] = { label: raw, patients: 0, invoices: 0, amount: 0 };
     bucket[key].patients += 1;
+    bucket[key].invoices += n0(p.invoices);
     bucket[key].amount += n0(p.amount);
   }
 
@@ -248,8 +264,10 @@ async function surgeryRows(run, perPatient, to) {
       key,
       label: v.label.charAt(0).toUpperCase() + v.label.slice(1),
       patients: v.patients,
+      invoices: v.invoices,
       amount: Math.round(v.amount),
       avg: v.patients > 0 ? Math.round(v.amount / v.patients) : null,
+      avgPerBill: v.invoices > 0 ? Math.round(v.amount / v.invoices) : null,
     }))
     .sort((a, b) => b.patients - a.patients || b.amount - a.amount);
 }
@@ -320,6 +338,7 @@ async function getIpdSection({ location, from, to, compare, preset }) {
     revenue: current.revenue,
     due: current.due,
     avgPerPatient: current.avgPerPatient,
+    avgPerBill: current.avgPerBill,
     byStatus: current.byStatus,
     surgeries,
     // Excluded from every figure above; null if the lookup failed.
@@ -335,6 +354,7 @@ async function getIpdSection({ location, from, to, compare, preset }) {
           cases: prev.cases,
           revenue: prev.revenue,
           avgPerPatient: prev.avgPerPatient,
+          avgPerBill: prev.avgPerBill,
         }
       : null,
     deltas: prev
@@ -342,6 +362,7 @@ async function getIpdSection({ location, from, to, compare, preset }) {
           cases: delta(current.cases, prev.cases),
           revenue: delta(current.revenue, prev.revenue),
           avgPerPatient: delta(current.avgPerPatient, prev.avgPerPatient),
+          avgPerBill: delta(current.avgPerBill, prev.avgPerBill),
         }
       : null,
   };

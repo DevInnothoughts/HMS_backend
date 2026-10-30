@@ -162,6 +162,24 @@ router.get("/ihxData", async (req, res, next) => {
   }
 });
 
+// Insurance Due List — insurer-wise dues, IPD Due List ageing buckets.
+const { getInsuranceDueList } = require("../models/insuranceDueModel");
+router.get("/insuranceDueList", (req, res, next) =>
+  getInsuranceDueList({ location: req.query.location })
+    .then((d) => res.json(d))
+    .catch(next),
+);
+
+// Insurance Comparison — billed vs approved, approved vs settled (Cashless).
+const {
+  getInsuranceComparison,
+} = require("../models/insuranceComparisonModel");
+router.get("/insuranceComparison", (req, res, next) =>
+  getInsuranceComparison({ location: req.query.location })
+    .then((d) => res.json(d))
+    .catch(next),
+);
+
 router.get("/statuswiseDueList/v2", (req, res, next) =>
   getStatuswiseIPDDueListV2(req)
     .then((d) => res.json(d))

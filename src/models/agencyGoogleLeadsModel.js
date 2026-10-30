@@ -34,8 +34,9 @@
 // ────────────────────────────────────────────────────────────────
 //   web       appointments.utmsource column, then utm_* inside pageurl
 //   web call  call_leads.utm_source column, then utm_* inside pageUrl
-//   bot       chatbot_leads has no known UTM column, so EVERY text column of
-//             the row is scanned for utm_source= / gad_campaignid= / utm_term=.
+//   bot       chatbot_leads.utm_source and .utm_campaign_id columns (the
+//             campaign id); every text column of the row is still scanned
+//             as a fall-back for utm_source= / gad_campaignid= / utm_term=.
 //             If the bot system stores no UTM data, no bot lead can be proven
 //             Google and the Bot figures are zero.
 // The URL is percent-decoded (up to 3 times, for double-encoded links) and
@@ -64,6 +65,9 @@ const {
   trendWindow,
   fyStartYear,
 } = require("./adAgencyLeadsModel");
+// Meta bot leads (lead_source "mumbai_chatbot") are never Google — they have
+// their own tab (metaLeadsModel.js).
+const { isMetaBotLead } = require("./metaLeadsModel");
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -286,10 +290,16 @@ async function botEntries(location, from, to) {
   );
   const out = [];
   for (const r of rows) {
+    // Meta leads (lead_source "mumbai_chatbot") are counted on the Meta tab,
+    // never here — even if their UTM says google.
+    if (isMetaBotLead(r)) continue;
     const utm = utmOf(r, {
       source: r.utm_source || r.utmsource,
       campaign: r.utm_campaign,
-      campaignId: r.gad_campaignid,
+      // chatbot_leads carries the Google Ads campaign id in its own
+      // utm_campaign_id column (Oct 2026) — the bot's equivalent of the
+      // gad_campaignid that web and web-call leads carry in their page URL.
+      campaignId: r.utm_campaign_id || r.gad_campaignid,
       term: r.utm_term,
     });
     if (!isGoogle(utm)) continue;

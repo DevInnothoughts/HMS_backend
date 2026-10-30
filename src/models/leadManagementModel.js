@@ -1,5 +1,6 @@
 const { getConnectionByLocation } = require("../../databaseUtils");
 const util = require("util");
+const { buildBranchWhere } = require("./leadsStatsModel");
 
 async function getLeads(location) {
   const { connection } = getConnectionByLocation("lead");
@@ -587,6 +588,22 @@ async function getDatewiseLeads(location, fromDate, toDate) {
             selected_area LIKE CONCAT('%', ?) 
             OR selected_area LIKE CONCAT('%', 'Kapurbawdi', '%')
           `;
+        } else if (location === "Ahmedabad") {
+          // Ellisbridge is the Ahmedabad centre (Bopal is its own branch).
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?, '%')
+            OR selected_area LIKE '%Ellisbridge%'
+            OR selected_area LIKE '%Ellis Bridge%'
+          `;
+        } else if (location === "Hyderabad") {
+          // Jubilee Hills is the Hyderabad centre — same as the Lead Stats
+          // Report and the bot lead list (Secunderabad / Gachibowli are their
+          // own branches).
+          areaConditions = `
+            selected_area LIKE CONCAT('%', ?, '%')
+            OR selected_area LIKE '%Jubilee Hills%'
+            OR selected_area LIKE '%Jubileehills%'
+          `;
         }
 
         const query = `
@@ -716,72 +733,24 @@ async function getDatewiseBotLeads(location, fromDate, toDate) {
     leadDB.getConnection(function (err, tempCon) {
       if (err) return reject(err);
 
-      let query = `
+      // Branch matching is the Lead Stats Report's (leadsStatsModel
+      // buildBranchWhere): every alias, spacing / hyphen-insensitive — so
+      // "Gurgaon - Sector 14" lands in Gurgaon Sector 14 — and DP Road also
+      // takes bot leads with both branch fields blank. The list and the
+      // report can no longer disagree on which branch a lead belongs to.
+      const { whereClause, params: branchParams } = buildBranchWhere(location);
+      const query = `
         SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, email, disease, chat_whatsapp_branch, query AS message, status, note
         FROM chatbot_leads 
-        WHERE (branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%'))
+        WHERE ${whereClause}
           AND DATE(datetime) BETWEEN ? AND ?
         ORDER BY id DESC
       `;
-
-      let queryParams = [
-        location,
-        location,
+      const queryParams = [
+        ...branchParams,
         `${fromDate}T00:00:00+05:30`,
         `${toDate}T23:59:59+05:30`,
       ];
-
-      // Custom location mappings (optional)
-      const locationMap = {
-        "DP Road": ["%Tilak Road%", "%Dhole Patil Road%"],
-        "Salunke Vihar": ["%Salunkhe Vihar%", "%Wanowrie%"],
-        Hinjewadi: ["%Hinjawadi%"],
-        HSR: ["%HSR Layout%"],
-        "Rajaji Nagar": ["%Rajajinagar%"],
-        Belgavi: ["%Belagavi%"],
-        Hyderabad: ["%Jubilee Hills%"],
-        "Gurgaon Sector 14": [
-          "%Gurugram - Sector 14%",
-          "%Gurgaon Sector - 14%",
-        ],
-        "Gurgaon Sector 49": [
-          "%Gurugram - Sector 49%",
-          "%Gurgaon Sector - 49%",
-        ],
-        Chinchwad: ["%Pimpri-Chinchwad%"],
-      };
-      if (locationMap[location]) {
-        let extraConditions = locationMap[location]
-          .map(
-            (alias) =>
-              `(branch LIKE '${alias}' OR chat_whatsapp_branch LIKE '${alias}')`,
-          )
-          .join(" OR ");
-
-        // DP Road also absorbs bot leads with both branch fields blank
-        // (previously these went to Vashi).
-        if (location === "DP Road") {
-          extraConditions += ` OR (branch = '' AND chat_whatsapp_branch = '')`;
-        }
-
-        const baseCondition = `(branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%'))`;
-
-        query = `
-          SELECT id AS appointment_id, datetime AS date, name, branch, contact AS phoneno, email, disease, chat_whatsapp_branch, query AS message, status, note
-          FROM chatbot_leads 
-          WHERE (${baseCondition}${
-            extraConditions ? ` OR ${extraConditions}` : ""
-          })
-            AND DATE(datetime) BETWEEN ? AND ?
-          ORDER BY id DESC
-        `;
-        queryParams = [
-          location,
-          location,
-          `${fromDate}T00:00:00+05:30`,
-          `${toDate}T23:59:59+05:30`,
-        ];
-      }
 
       tempCon.query(query, queryParams, async function (error, rows) {
         tempCon.release();

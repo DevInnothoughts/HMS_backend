@@ -101,4 +101,32 @@ router.get("/v2/trend", async (req, res, next) => {
   }
 });
 
+// ─── Meta leads — Lead Stats Report's "Meta leads" tab ───────────────────────
+// Bot leads whose lead_source is "mumbai_chatbot" (metaLeadsModel.js). The
+// same rows are excluded from every Google figure.
+const { getMetaStats, getMetaLeads } = require("../models/metaLeadsModel");
+
+// GET /leadsStats/meta/stats?from=2026-10-01&to=2026-10-29&locations=Andheri,Thane
+router.get("/meta/stats", async (req, res, next) => {
+  try {
+    const { from, to, locations } = req.query;
+    const data = await getMetaStats({ from, to, locations });
+    res.status(200).json({ success: true, data });
+  } catch (err) {
+    fail(res, next, err);
+  }
+});
+
+// GET /leadsStats/meta/leads?location=Andheri&from=2026-10-01&to=2026-10-29
+// One branch's Meta leads. Phones masked server-side (98XXXXXX45).
+router.get("/meta/leads", async (req, res, next) => {
+  try {
+    const { location, from, to } = req.query;
+    const data = await getMetaLeads({ location, from, to });
+    res.status(200).json({ success: true, data });
+  } catch (err) {
+    fail(res, next, err);
+  }
+});
+
 module.exports = router;

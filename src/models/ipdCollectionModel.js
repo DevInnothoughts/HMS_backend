@@ -1348,6 +1348,7 @@ const getStatuswiseIPDDueListV2 = async (req) => {
               p.phone,
               i.status,
               i.creation_date,
+              DATE_FORMAT(i.creation_date, '%Y-%m-%d') AS invoice_date,
               i.totalamt,
               i.totaldue,
               i.insurancecompany,
@@ -1383,7 +1384,11 @@ const getStatuswiseIPDDueListV2 = async (req) => {
 
     // Insurer and TPA share one id space and one cutover, so both resolve in a
     // single pass against one pair of maps.
-    await addCompanyNames(rows, connection, "creation_date", [
+    // Routed by invoice_date ('YYYY-MM-DD'), not creation_date: the pool
+    // returns dates as JS Date objects, whose string form ("Wed Jul 01 …")
+    // never compares with the 2026-07-01 cutover, so every invoice was being
+    // looked up in the master first.
+    await addCompanyNames(rows, connection, "invoice_date", [
       "insurancecompany",
       "tpa",
     ]);

@@ -21,7 +21,8 @@
 // THE DIVISORS ARE NOT ALL THE SAME KIND OF THING
 // ───────────────────────────────────────────────
 //   OPD      distinct patients billed
-//   IPD      distinct patients invoiced
+//   IPD      INVOICE COUNT (bills) — a patient can have more than one
+//            surgery in the period, each its own invoice (Oct 2026)
 //   Lab      distinct patients billed for a lab item
 //   Pharmacy INVOICE COUNT, not patients
 //
@@ -110,6 +111,7 @@ async function getOpdLabPatients(run, from, to, labNames) {
 async function getIpdBilling(run, from, to) {
   const [row] = await run(
     `SELECT COUNT(DISTINCT CASE WHEN ${countedSql("i")} THEN i.patient_id END) AS cnt,
+            SUM(CASE WHEN ${countedSql("i")} THEN 1 ELSE 0 END)                AS bills,
             COALESCE(SUM(CASE WHEN ${countedSql("i")} THEN i.totalamt ELSE 0 END), 0) AS amount,
             SUM(CASE WHEN ${countedSql("i")} THEN 0 ELSE 1 END)                AS ib_cnt,
             COALESCE(SUM(CASE WHEN ${countedSql("i")} THEN 0 ELSE i.totalamt END), 0) AS ib_amount
@@ -120,6 +122,7 @@ async function getIpdBilling(run, from, to) {
   );
   return {
     patients: n0(row?.cnt),
+    bills: n0(row?.bills),
     amount: n0(row?.amount),
     // Excluded interbranch invoices (operated here for another branch).
     interbranchCount: n0(row?.ib_cnt),
@@ -259,7 +262,8 @@ async function getCollection(location, from, to) {
   const ipd = round0(
     ipdBilling ? ipdBilling.amount : summary?.ipdInvoice?.total,
   );
-  const ipdPatients = ipdBilling ? ipdBilling.patients : null;
+  // IPD average is per bill (invoice), not per patient — see header.
+  const ipdBills = ipdBilling ? ipdBilling.bills : null;
   const pharmacy = round0(summary?.pharmacy?.total);
 
   // No longer === summary.grandTotal: IPD here excludes interbranch
@@ -278,9 +282,9 @@ async function getCollection(location, from, to) {
       label: "IPD",
       amount: ipd,
       pct: pctOf(ipd),
-      count: ipdPatients,
-      countBasis: "patients",
-      avg: avgOf(ipd, ipdPatients),
+      count: ipdBills,
+      countBasis: "invoices",
+      avg: avgOf(ipd, ipdBills),
       // Shown under the IPD row so the lower figure explains itself.
       interbranch: ipdBilling
         ? {

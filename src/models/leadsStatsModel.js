@@ -42,7 +42,8 @@ const LOCATION_ALIASES = {
   Undri: ["Undri"],
   Vashi: ["Vashi"],
   Katraj: ["Katraj"],
-  Ahmedabad: ["Ahmedabad"],
+  // Ellisbridge is the Ahmedabad centre (Bopal is its own branch).
+  Ahmedabad: ["Ahmedabad", "Ellisbridge", "Ellis Bridge"],
   Mohali: ["Mohali"],
   Aurangabad: ["Aurangabad"],
   Whitefield: ["Whitefield"],
@@ -76,14 +77,31 @@ function buildAreaWhere(location) {
   return { whereClause: `(${conditions.join(" OR ")})`, params };
 }
 
+// Branch names arrive from the chatbot / WhatsApp in many spellings —
+// "Gurgaon Sector 14", "Gurgaon - Sector 14", "Gurugram - Sector 14",
+// "Gurgaon Sector - 14" … — so bot leads are matched on a NORMALISED form:
+// lower case with spaces, hyphens, dots and commas removed, on both the column
+// and the alias ("Gurgaon - Sector 14" → "gurgaonsector14"). A new spacing or
+// hyphen variant then needs no new alias.
+const normSql = (col) =>
+  `REPLACE(REPLACE(REPLACE(REPLACE(LOWER(COALESCE(${col}, '')), ' ', ''), '-', ''), '.', ''), ',', '')`;
+const normAlias = (a) =>
+  String(a || "")
+    .toLowerCase()
+    .replace(/[\s\-.,]+/g, "");
+
 function buildBranchWhere(location) {
-  const aliases = LOCATION_ALIASES[location] || [location];
+  const aliases = [
+    ...new Set((LOCATION_ALIASES[location] || [location]).map(normAlias)),
+  ].filter(Boolean);
   const conditions = [];
   const params = [];
 
   aliases.forEach((alias) => {
     conditions.push(
-      `(branch LIKE CONCAT('%', ?, '%') OR chat_whatsapp_branch LIKE CONCAT('%', ?, '%'))`,
+      `(${normSql("branch")} LIKE CONCAT('%', ?, '%') OR ${normSql(
+        "chat_whatsapp_branch",
+      )} LIKE CONCAT('%', ?, '%'))`,
     );
     params.push(alias, alias);
   });

@@ -119,7 +119,8 @@ const LOCATION_ALIASES = {
   Undri: ["Undri"],
   Vashi: ["Vashi"],
   Katraj: ["Katraj"],
-  Ahmedabad: ["Ahmedabad"],
+  // Ellisbridge is the Ahmedabad centre (Bopal is its own branch).
+  Ahmedabad: ["Ahmedabad", "Ellisbridge", "Ellis Bridge"],
   Mohali: ["Mohali"],
   Aurangabad: ["Aurangabad"],
   Whitefield: ["Whitefield"],
